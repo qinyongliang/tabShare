@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {resolveTab, cdpInput, serverOrigin, targetURL} from '../extension/controller.js';
+import {resolveTab, cdpInput, serverOrigin, targetURL, rasterFrame} from '../extension/controller.js';
 
 function tabs(initial = []) {
   const values = new Map(initial.map(t => [t.id, t]));
@@ -46,4 +46,11 @@ test('server requires TLS except loopback and URL reuse preserves query strings'
   assert.throws(() => serverOrigin('http://remote.example/'));
   assert.throws(() => serverOrigin('https://user:password@remote.example/'));
   assert.equal(targetURL('https://EXAMPLE.com?b=2&a=1#part'), 'https://example.com/?b=2&a=1');
+});
+
+test('large screenshots lower JPEG quality to stay within the relay frame budget',async()=>{
+ const qualities=[],oversized='x'.repeat(2*1024*1024),clip={x:10,y:20,width:200,height:80,scale:1};
+ const frame=await rasterFrame(async options=>{qualities.push(options.quality);assert.deepEqual(options.clip,clip);return {data:options.quality>15?oversized:'frame'};},{clip,format:'jpeg',captureBeyondViewport:false});
+ assert.equal(frame.data,'frame');assert.deepEqual(qualities,[65,40,15]);
+ await assert.rejects(()=>rasterFrame(async()=>({data:oversized}),{}),/传输预算/);
 });

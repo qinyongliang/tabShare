@@ -1,4 +1,4 @@
-import {serverOrigin, targetURL, resolveTab, cdpInput} from './controller.js';
+import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame} from './controller.js';
 import {installDOM, captureDOM} from './dom-capture.js';
 import {ResourceBridge} from './resources.js';
 
@@ -145,13 +145,22 @@ async function raster(tabId) {
     for(const region of regions){
       const options={format:'jpeg',quality:65,fromSurface:true,captureBeyondViewport:false};
       if(!info.full)options.clip={x:region.x,y:region.y,width:region.width,height:region.height,scale:1};
-      const shot=await command(tabId,'Page.captureScreenshot',options);
+      const shot=await rasterFrame(params=>command(tabId,'Page.captureScreenshot',params),options);
       bytes+=shot.data.length;
       for(const id of target.sessions)transmit({type:'raster',sessionId:id,nodeId:region.id,full:info.full,data:shot.data,width:region.width,height:region.height});
     }
     // Fallback pixels are disposable and limited to two frames/s, with their own 64 KiB/s budget.
     target.nextRaster=Date.now()+Math.max(500,bytes/65536*1000);
   }catch{/* Navigation can temporarily destroy the isolated world. */}finally{target.rasterBusy=false;}
+}
+async function resizeViewport(tabId,viewport) {
+  const target=targets.get(tabId);if(!target)return;
+  if(viewport)await command(tabId,'Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.deviceScaleFactor,mobile:false,screenWidth:viewport.width,screenHeight:viewport.height,screenOrientation:{type:viewport.width>viewport.height?'landscapePrimary':'portraitPrimary',angle:viewport.width>viewport.height?90:0}});
+  else if(target.viewport)await command(tabId,'Emulation.clearDeviceMetricsOverride');
+  target.viewport=viewport;
+  for(const id of target.sessions)transmit({type:'viewport',sessionId:id,viewport});
+  await world(tabId);await evaluate(tabId,'globalThis.__tabShareDOM.invalidate()');
+  target.pending=null;target.nextSend=0;target.nextRaster=0;await snapshot(tabId);
 }
 async function resync(sessionId) {
   const binding = bindings.get(sessionId);
@@ -171,9 +180,11 @@ async function targetFor(tab,mode='dom') {
   target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);return target;
 }
 async function switchTab(id,tab,binding) {
+  const viewport=targets.get(binding.tabId)?.viewport;
   const mode=targets.get(binding.tabId)?.mode||(await chrome.storage.local.get('sessionModes')).sessionModes?.[id]||'dom';
   await pause(id);
   const target=await targetFor(tab,mode);target.sessions.add(id);bindings.set(id,{...binding,tabId:tab.id});
+  if(viewport)await resizeViewport(tab.id,viewport);
   if(target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;}
   status(id,'connected','',tab);await snapshot(tab.id);
 }
@@ -212,6 +223,7 @@ async function pause(sessionId) {
   clearInterval(target.timer);
   clearInterval(target.rasterTimer);
   target.resources?.dispose();
+  if(target.viewport)try{await command(binding.tabId,'Emulation.clearDeviceMetricsOverride');}catch{}
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
   targets.delete(binding.tabId);
   try { await chrome.debugger.detach({tabId: binding.tabId}); } catch { /* Already closed/detached. */ }
@@ -223,6 +235,8 @@ async function control(message) {
   let input = message.input;
   const {action} = input;
   const target=targets.get(binding.tabId);
+  if(action==='viewport'){await resizeViewport(binding.tabId,{width:input.width,height:input.height,deviceScaleFactor:input.deviceScaleFactor,owner:input.viewerId});return;}
+  if(action==='restoreViewport'||action==='viewportRelease'){if(action==='viewportRelease'&&target.viewport?.owner!==input.viewerId)return;await resizeViewport(binding.tabId,null);return;}
   if(action==='closePopup'){if(binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
   if(action==='dialog'){if(target?.dialog?.id!==input.dialogId)return;await command(binding.tabId,'Page.handleJavaScriptDialog',{accept:!!input.accept,promptText:input.text||''});return;}
   if(action==='mode'){await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}

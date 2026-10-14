@@ -2,7 +2,7 @@
   "name": "tabshare-checks",
   "private": true,
   "type": "module",
-  "scripts": {"test": "node --test tests/controller.test.mjs", "pretest:e2e":"go build -o bin/tabshare ./cmd/tabshare", "test:e2e": "node tests/e2e.mjs"},
+  "scripts": {"test": "node --test tests/*.test.mjs", "pretest:e2e":"go build -o bin/tabshare ./cmd/tabshare", "test:e2e": "node tests/e2e.mjs"},
   "engines": {"node": ">=22"},
   "devDependencies": {"playwright-core": "1.57.0"}
 }

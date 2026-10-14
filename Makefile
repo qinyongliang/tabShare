@@ -3,6 +3,6 @@ build:
 	go build -o bin/tabshare ./cmd/tabshare
 test:
 	go test -race ./...
-	node --test tests/controller.test.mjs
+	npm test
 run:
 	go run ./cmd/tabshare

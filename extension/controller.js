@@ -46,3 +46,12 @@ export function cdpInput(input) {
   if (action === 'reload') return ['Page.reload', {}];
   throw new Error('不支持的控制指令');
 }
+
+// Keep large/complex displays within the relay's 2 MiB encoded-frame limit.
+export async function rasterFrame(capture,options) {
+  for(const quality of [65,40,15,5]){
+    const shot=await capture({...options,quality});
+    if(shot.data?.length<2*1024*1024)return shot;
+  }
+  throw new Error('画面超过传输预算');
+}

@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import vm from 'node:vm';
-import {serverOrigin,targetURL,resolveTab,cdpInput} from '../extension/controller.js';
+import {serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame} from '../extension/controller.js';
 import {installDOM,captureDOM} from '../extension/dom-capture.js';
 import {ResourceBridge} from '../extension/resources.js';
 import {chromium} from 'playwright-core';
@@ -83,7 +83,7 @@ try {
       state.loads++; state.path = req.url; state.cookie = req.headers.cookie || '';
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Set-Cookie', 'shared-login=present; SameSite=Lax; Path=/');
-      res.end(`<!doctype html><html><head><title>Shared test tab</title><style>body{margin:0;height:2500px;background:#eaf1fb;font:20px sans-serif}button{position:absolute;left:40px;top:60px;width:160px;height:40px}input{position:absolute;left:40px;top:130px;width:300px;height:40px}#check{left:390px;width:25px}#choice{position:absolute;left:450px;top:130px}#anim{position:absolute;left:40px;top:280px;animation:pulse 1s linear infinite}#canvas{position:absolute;left:40px;top:360px;display:none}@keyframes pulse{from{opacity:.4}to{opacity:1}}h1{position:absolute;left:40px;top:200px}</style></head><body><button id="click">Increment</button><input id="text"><input id="check" type="checkbox"><select id="choice"><option value="a">A</option><option value="b">B</option></select><div id="anim">Local CSS animation</div><canvas id="canvas" width="200" height="90"></canvas><h1>Shared real tab ${req.url}</h1><script>const post=data=>fetch('/event',{method:'POST',body:JSON.stringify(data)});let clicks=${state.clicks};document.querySelector('#click').onclick=()=>post({clicks:++clicks});document.querySelector('#text').oninput=e=>post({text:e.target.value});document.querySelector('#check').onchange=e=>post({checked:e.target.checked});document.querySelector('#choice').onchange=e=>post({choice:e.target.value,choiceTrusted:e.isTrusted});document.querySelector('#canvas').onclick=()=>post({canvasClicks:1});addEventListener('scroll',()=>post({scroll:scrollY}));</script></body></html>`); return;
+      res.end(`<!doctype html><html><head><title>Shared test tab</title><style>body{margin:0;height:2500px;background:#eaf1fb;font:20px sans-serif}button{position:absolute;left:40px;top:60px;width:160px;height:40px}input{position:absolute;left:40px;top:130px;width:300px;height:40px}#check{left:390px;width:25px}#choice{position:absolute;left:450px;top:130px}#anim{position:absolute;left:40px;top:280px;animation:pulse 1s linear infinite}#canvas{position:absolute;left:40px;top:360px;display:none}@keyframes pulse{from{opacity:.4}to{opacity:1}}#responsive{position:absolute;left:20px;top:500px;width:400px;background:rgb(240,240,240)}@media(max-width:600px){#click{left:20px;width:130px}#responsive{width:calc(100% - 40px);background:rgb(210,240,220)}}h1{position:absolute;left:40px;top:200px}</style></head><body><button id="click">Increment</button><input id="text"><input id="check" type="checkbox"><select id="choice"><option value="a">A</option><option value="b">B</option></select><div id="anim">Local CSS animation</div><canvas id="canvas" width="200" height="90"></canvas><div id="responsive">Responsive layout</div><h1>Shared real tab ${req.url}</h1><script>const post=data=>fetch('/event',{method:'POST',body:JSON.stringify(data)});let clicks=${state.clicks};document.querySelector('#click').onclick=()=>post({clicks:++clicks});document.querySelector('#text').oninput=e=>post({text:e.target.value});document.querySelector('#check').onchange=e=>post({checked:e.target.checked});document.querySelector('#choice').onchange=e=>post({choice:e.target.value,choiceTrusted:e.isTrusted});document.querySelector('#canvas').onclick=()=>post({canvasClicks:1});addEventListener('scroll',()=>post({scroll:scrollY}));</script></body></html>`); return;
     }
     res.writeHead(404); res.end();
   });
@@ -122,7 +122,7 @@ try {
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,serverOrigin,targetURL,resolveTab,cdpInput,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
   vm.runInNewContext(workerSource,sandbox,{filename:'extension/worker.js'});
   async function request(message){return new Promise(resolve=>{messages.fire(message,{id:chrome.runtime.id},resolve);});}
@@ -139,7 +139,7 @@ try {
   visitors = await chromium.launch({executablePath: browserPath, headless: true, args: ['--no-sandbox']});
   const context = await visitors.newContext({viewport: {width: 1440, height: 1000}});
   const errors = [],viewerInputs=[];
-  async function view(url) { const page = await context.newPage(); page.on('pageerror',e=>errors.push(e.message));page.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}})); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
+  async function view(url,viewerContext=context) { const page = await viewerContext.newPage(); page.on('pageerror',e=>errors.push(e.message));page.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}})); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
   const one = await view(share.value.shareUrl);
   const two = await view(share.value.shareUrl);
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
@@ -169,6 +169,48 @@ try {
   console.log('Animation measurement:',animationPackets.length,'batches in 2.1s,',animationPackets.reduce((n,p)=>n+p.bytes,0),'bytes');
   await until(()=>remoteOne.locator('#text').inputValue().then(v=>v==='hello你好 paste'),'authoritative native input rendering');
   console.log('PASS: native DOM rendering, two viewers, real input/Chinese/paste/keys, sparse deltas, no idle packets');
+  const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
+  const nativeMetrics=await sourceMetrics();
+  async function assertFits(page){await until(()=>page.evaluate(()=>{const stage=document.querySelector('#stage'),surface=document.querySelector('#surface'),style=getComputedStyle(stage),box=surface.getBoundingClientRect();return box.width<=stage.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)+1&&box.height<=stage.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom)+1&&document.documentElement.scrollWidth<=innerWidth;}),'shared surface fits available window');}
+  for(const size of [{width:390,height:844},{width:390,height:260},{width:844,height:390},{width:3840,height:2160}]){await one.setViewportSize(size);await assertFits(one);const before=state.clicks;await remoteOne.locator('#click').click();await until(()=>state.clicks===before+1,'scaled DOM click at '+size.width+'x'+size.height);}
+  assert.equal((await sourceMetrics()).width,nativeMetrics.width,'independent fitting never changes source resolution');
+  await one.setViewportSize({width:390,height:260});await assertFits(one);await one.locator('#share-settings-toggle').click();
+  await one.locator('#display-sizing').selectOption('width');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollHeight>e.clientHeight;}),'fit-width allows local vertical pan');
+  await one.locator('#display-sizing').selectOption('actual');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollWidth>e.clientWidth&&Number(document.querySelector('#surface').dataset.scale)===1;}),'original size allows horizontal and vertical pan');
+  assert.notEqual(await one.locator('#surface').getAttribute('data-scale'),await two.locator('#surface').getAttribute('data-scale'),'visitors have independent display settings');
+  await one.locator('#display-zoom').fill('150');assert.equal(await one.locator('#display-sizing').inputValue(),'custom');await until(()=>one.locator('#surface').getAttribute('data-scale').then(s=>s==='1.5'),'custom zoom');
+  await one.locator('#display-sizing').selectOption('fit');await one.locator('#share-settings-toggle').click();await one.setViewportSize({width:390,height:844});await assertFits(one);
+  await one.bringToFront();await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!!document.fullscreenElement),'fullscreen enters').catch(async error=>{console.log('Fullscreen state:',await one.evaluate(()=>({enabled:document.fullscreenEnabled,visible:document.visibilityState,status:document.querySelector('#status').textContent})));throw error;});await assertFits(one);await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!document.fullscreenElement),'fullscreen exits');
+  await one.evaluate(()=>Object.defineProperty(document,'fullscreenEnabled',{configurable:true,value:false}));await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>document.body.classList.contains('immersive')&&!document.fullscreenElement),'browser without fullscreen uses immersive display');await assertFits(one);await one.locator('#fullscreen').click();await one.evaluate(()=>{delete document.fullscreenEnabled;});
+  await one.locator('#share-settings-toggle').click();await one.locator('#follow-viewport').check();
+  await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.height>=240;},'shared viewport adapts source layout');
+  await until(()=>remoteTwo.locator('#responsive').evaluate(e=>getComputedStyle(e).backgroundColor==='rgb(210, 240, 220)'),'responsive CSS is computed on source and shared with other viewers');
+  const followedSize=await sourceMetrics();await one.locator('#display-zoom').fill('150');await new Promise(resolve=>setTimeout(resolve,650));assert.equal((await sourceMetrics()).width,followedSize.width,'local zoom does not resize shared layout');await one.locator('#display-sizing').selectOption('fit');
+  const beforeSmall=state.clicks;await one.locator('#share-settings-toggle').click();await remoteOne.locator('#click').click();await until(()=>state.clicks===beforeSmall+1,'click after real source reflow');
+  await two.locator('#share-settings-toggle').click();await two.locator('#follow-viewport').check();await until(async()=>(await sourceMetrics()).width>1000,'second viewer takes viewport control');
+  await until(()=>one.locator('#follow-viewport').isChecked().then(v=>!v),'old driver stops following');
+  const secondSize=await sourceMetrics();await one.setViewportSize({width:844,height:390});await new Promise(resolve=>setTimeout(resolve,800));assert.equal((await sourceMetrics()).width,secondSize.width,'old viewer resizing cannot overwrite new driver');
+  await two.locator('#restore-viewport').click();await until(async()=>(await sourceMetrics()).width===nativeMetrics.width,'explicit source viewport restore');await two.locator('#share-settings-toggle').click();
+  // Real mobile input and high DPI: bitmap coordinates remain source CSS pixels.
+  const phoneContext=await visitors.newContext({viewport:{width:390,height:844},deviceScaleFactor:2,hasTouch:true,isMobile:true});
+  const phone=await view(share.value.shareUrl,phoneContext);await assertFits(phone);
+  await phone.locator('#share-settings-toggle').click();await phone.locator('#follow-viewport').check();await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'high-DPI source viewport');
+  await phone.setViewportSize({width:844,height:390});await until(async()=>(await sourceMetrics()).width>600,'driving viewer rotation updates source width');
+  await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"screen.orientation.type==='landscape-primary'",returnByValue:true}).then(r=>r.result.value),'source orientation follows driving viewer');
+  await phone.setViewportSize({width:390,height:844});await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'driving viewer rotates back');
+  await phone.locator('[name=share-mode][value=raster]').check();await phone.locator('#share-settings-toggle').click();await phone.locator('#fallback').waitFor({state:'visible'});await assertFits(phone);
+  let phoneMetrics=await sourceMetrics();await until(()=>phone.locator('#fallback').evaluate((image,width)=>image.naturalWidth===width*2,phoneMetrics.width),'retina bitmap is twice CSS width');
+  const pixels=await phone.locator('#fallback').boundingBox(),tapX=pixels.x+85*pixels.width/phoneMetrics.width,tapY=pixels.y+80*pixels.height/phoneMetrics.height;
+  const beforeTouch=state.clicks;await phone.touchscreen.tap(tapX,tapY);await until(()=>state.clicks===beforeTouch+1,'retina raster touch click');
+  const gesture=await phoneContext.newCDPSession(phone);const x=pixels.x+pixels.width*.65,startY=pixels.y+pixels.height*.75,endY=pixels.y+pixels.height*.4;
+  await gesture.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:startY}]});
+  for(let step=1;step<=5;step++){await gesture.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:startY+(endY-startY)*step/5}]});await new Promise(resolve=>setTimeout(resolve,60));}
+  await gesture.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await until(async()=>(await sourceMetrics()).scroll>50,'raster touch swipe scrolls original page');assert.equal(state.clicks,beforeTouch+1,'swipe never becomes a source click');
+  await phone.locator('#share-settings-toggle').click();await phone.locator('[name=share-mode][value=dom]').check();await phoneContext.close();
+  await until(async()=>{const m=await sourceMetrics();return m.width===nativeMetrics.width&&m.height===nativeMetrics.height&&m.dpr===nativeMetrics.dpr;},'driver disconnect restores native source viewport');
+  await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'scrollTo(0,0)'});await until(async()=>(await sourceMetrics()).scroll===0,'restore source scroll');
+  await one.setViewportSize({width:1440,height:1000});await assertFits(one);await one.screenshot({path:path.join(root,'test-results/responsive-display.png')}).catch(async()=>{await mkdir(path.join(root,'test-results'),{recursive:true});await one.screenshot({path:path.join(root,'test-results/responsive-display.png')});});
+  console.log('PASS: phone/landscape/4K fit, independent width/original/zoom, full screen, source responsive reflow, driver handoff/restoration, DPR2 raster tap and touch swipe');
   await one.locator('#address').fill(sourceURL.replace('/fixture', '/next')); await one.locator('#address').press('Enter');
   await until(() => state.path === '/next', 'shared browser navigation');
   assert.ok(state.cookie.includes('shared-login=present'), 'shared browser preserves login cookies');

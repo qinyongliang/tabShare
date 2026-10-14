@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TabShare",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "主动开启共享后，通过网页让多人操作同一个真实标签页。",
   "minimum_chrome_version": "118",
   "permissions": ["debugger", "tabs", "storage", "alarms"],

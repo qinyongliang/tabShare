@@ -38,6 +38,7 @@ function bootstrap() {
   listen(document,'selectionchange',()=>mark(document.activeElement));
   listen(globalThis,'scroll',()=>mark(document.body));
   listen(globalThis,'resize',()=>mark(document.body,true));
+  let dprQuery;function changedDPR(){watchDPR();mark(document.body,true);}function watchDPR(){dprQuery?.removeEventListener('change',changedDPR,true);dprQuery=matchMedia('(resolution: '+devicePixelRatio+'dppx)');listen(dprQuery,'change',changedDPR);}watchDPR();
   for(const type of ['mouseover','mouseout'])listen(document,type,event=>mark(event.target.parentElement===document.body?event.target:event.target.parentElement,true));
   function resource(url,kind='image',base=location.href) {
     try {
@@ -75,7 +76,7 @@ function bootstrap() {
     widget=document.createElement('div');widget.setAttribute('data-tabshare-owner-ui','');
     widget.style.cssText='all:initial!important;position:fixed!important;right:20px!important;bottom:20px!important;z-index:2147483647!important;display:block!important';
     const root=widget.attachShadow({mode:'closed'});
-    root.innerHTML=`<style>:host{font:14px system-ui;color:#23304a}button{font:inherit;background:#335fea;color:white;border:0;border-radius:24px;padding:12px 16px;cursor:pointer;box-shadow:0 3px 15px #0003}.panel{background:white;border:1px solid #dce3ee;border-radius:14px;padding:18px;width:260px;margin-bottom:10px;box-shadow:0 6px 30px #0002}h3{margin:0 0 12px;font-size:16px}label{display:block;margin:12px 0;cursor:pointer}small{display:block;color:#64718a;line-height:1.6}input{accent-color:#335fea}</style><section class="panel" hidden><h3>TabShare 共享设置</h3><label><input type="radio" name="mode" value="dom"> 本地模式（DOM 同步）</label><label><input type="radio" name="mode" value="raster"> 远程模式（画面流）</label><small>所有访客同步切换，保留当前标签页与登录状态。DOM 模式会自动对复杂区域使用画面降级。</small></section><button type="button" aria-label="TabShare 共享设置">TS 共享设置</button>`;
+    root.innerHTML=`<style>:host{font:14px system-ui;color:#23304a}button{font:inherit;background:#335fea;color:white;border:0;border-radius:24px;padding:12px 16px;cursor:pointer;box-shadow:0 3px 15px #0003}.panel{background:white;border:1px solid #dce3ee;border-radius:14px;padding:18px;width:260px;max-width:calc(100vw - 40px);max-height:calc(100dvh - 100px);overflow:auto;overscroll-behavior:contain;margin-bottom:10px;box-shadow:0 6px 30px #0002}h3{margin:0 0 12px;font-size:16px}label{display:block;margin:12px 0;cursor:pointer}small{display:block;color:#64718a;line-height:1.6}input{accent-color:#335fea}</style><section class="panel" hidden><h3>TabShare 共享设置</h3><label><input type="radio" name="mode" value="dom"> 本地模式（DOM 同步）</label><label><input type="radio" name="mode" value="raster"> 远程模式（画面流）</label><small>所有访客同步切换，保留当前标签页与登录状态。DOM 模式会自动对复杂区域使用画面降级。</small></section><button type="button" aria-label="TabShare 共享设置">TS 共享设置</button>`;
     const panel=root.querySelector('section');root.querySelector('button').onclick=()=>panel.hidden=!panel.hidden;
     for(const radio of root.querySelectorAll('input'))radio.onchange=()=>setMode(radio.value);
     updateWidget=()=>{for(const radio of root.querySelectorAll('input'))radio.checked=radio.value===mode;};updateWidget();
@@ -114,7 +115,7 @@ function bootstrap() {
     lastCapture=Date.now();
     if(!document.body)return null;
     if(pixelsOnly&&mode==='raster'){
-      dirty.clear();subtrees.clear();const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode};
+      dirty.clear();subtrees.clear();const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio};
       if(!first&&JSON.stringify(meta)===globalThis.__tabShareLastMeta)return null;globalThis.__tabShareLastMeta=JSON.stringify(meta);
       const root=idFor(document.body),result={version,sequence:++sequence,reset:first,root,nodes:first?[{id:root,tag:'body',children:[],style:{margin:'0px'},attrs:{}}]:[],updates:[],removes:[],meta};first=false;return result;
     }
@@ -164,7 +165,7 @@ function bootstrap() {
     if(first)encode(document.body);else for(const node of dirty)if(node.isConnected)encode(node);
     dirty.clear();
     for(const [id,node] of nodes)if(!node.isConnected){nodes.delete(id);if(previous.delete(id)){removes.push(id);retainedBytes-=sizes.get(id)||0;sizes.delete(id);}}
-    const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode};
+    const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio};
     const result={version,sequence:++sequence,reset:first,root:idFor(document.body),nodes:fresh,updates,removes,meta};
     const css=cssAnimations();if(first||css!==lastCSS){result.css=css;lastCSS=css;}
     if(requests.length)result.resources=requests.splice(0);
@@ -218,7 +219,7 @@ function bootstrap() {
     }
     return {mode,full:false,regions,width:innerWidth,height:innerHeight};
   }
-  globalThis.__tabShareDOM={capture,act,fallback,dispose,registerShadow,addStyles,setMode,resourceFailed(id){failedResources.add(id);},disposed:false,reset(){first=true;previous.clear();sizes.clear();retainedBytes=0;truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
+  globalThis.__tabShareDOM={capture,act,fallback,dispose,registerShadow,addStyles,setMode,invalidate(){mark(document.body,true);},resourceFailed(id){failedResources.add(id);},disposed:false,reset(){first=true;previous.clear();sizes.clear();retainedBytes=0;truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
 }
 export const installDOM = '(' + bootstrap.toString() + ')()';
 export const captureDOM = 'globalThis.__tabShareDOM.capture()';

@@ -18,7 +18,7 @@ func Serve(w http.ResponseWriter, r *http.Request) {
 		name = "viewer.html"
 	}
 	switch name {
-	case "index.html", "viewer.html", "viewer.js", "style.css", "mirror.js", "mirror.html", "resources.js":
+	case "index.html", "viewer.html", "viewer.js", "style.css", "mirror.js", "mirror.html", "resources.js", "display.js":
 	default:
 		http.NotFound(w, r)
 		return

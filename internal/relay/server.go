@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +36,8 @@ type Session struct {
 }
 type Message struct {
 	Type      string      `json:"type"`
+	ViewerID  string      `json:"viewerId,omitempty"`
+	Viewport  *Viewport   `json:"viewport,omitempty"`
 	Asset     *AssetMeta  `json:"asset,omitempty"`
 	Assets    []AssetMeta `json:"assets,omitempty"`
 	Mode      string      `json:"mode,omitempty"`
@@ -58,28 +61,38 @@ type Message struct {
 	Full      bool        `json:"full,omitempty"`
 }
 type Input struct {
-	Action     string     `json:"action"`
-	Mode       string     `json:"mode,omitempty"`
-	DialogID   string     `json:"dialogId,omitempty"`
-	Accept     bool       `json:"accept,omitempty"`
-	Selection  *Selection `json:"selection,omitempty"`
-	Values     []string   `json:"values,omitempty"`
-	X          float64    `json:"x,omitempty"`
-	Y          float64    `json:"y,omitempty"`
-	Button     string     `json:"button,omitempty"`
-	Buttons    int        `json:"buttons,omitempty"`
-	ClickCount int        `json:"clickCount,omitempty"`
-	DeltaX     float64    `json:"deltaX,omitempty"`
-	DeltaY     float64    `json:"deltaY,omitempty"`
-	Key        string     `json:"key,omitempty"`
-	Code       string     `json:"code,omitempty"`
-	KeyCode    int        `json:"keyCode,omitempty"`
-	Modifiers  int        `json:"modifiers,omitempty"`
-	Text       string     `json:"text,omitempty"`
-	URL        string     `json:"url,omitempty"`
-	NodeID     string     `json:"nodeId,omitempty"`
-	ScrollTop  float64    `json:"scrollTop,omitempty"`
-	ScrollLeft float64    `json:"scrollLeft,omitempty"`
+	Action            string     `json:"action"`
+	ViewerID          string     `json:"viewerId,omitempty"`
+	Width             int        `json:"width,omitempty"`
+	Height            int        `json:"height,omitempty"`
+	DeviceScaleFactor float64    `json:"deviceScaleFactor,omitempty"`
+	Mode              string     `json:"mode,omitempty"`
+	DialogID          string     `json:"dialogId,omitempty"`
+	Accept            bool       `json:"accept,omitempty"`
+	Selection         *Selection `json:"selection,omitempty"`
+	Values            []string   `json:"values,omitempty"`
+	X                 float64    `json:"x,omitempty"`
+	Y                 float64    `json:"y,omitempty"`
+	Button            string     `json:"button,omitempty"`
+	Buttons           int        `json:"buttons,omitempty"`
+	ClickCount        int        `json:"clickCount,omitempty"`
+	DeltaX            float64    `json:"deltaX,omitempty"`
+	DeltaY            float64    `json:"deltaY,omitempty"`
+	Key               string     `json:"key,omitempty"`
+	Code              string     `json:"code,omitempty"`
+	KeyCode           int        `json:"keyCode,omitempty"`
+	Modifiers         int        `json:"modifiers,omitempty"`
+	Text              string     `json:"text,omitempty"`
+	URL               string     `json:"url,omitempty"`
+	NodeID            string     `json:"nodeId,omitempty"`
+	ScrollTop         float64    `json:"scrollTop,omitempty"`
+	ScrollLeft        float64    `json:"scrollLeft,omitempty"`
+}
+type Viewport struct {
+	Width             int     `json:"width"`
+	Height            int     `json:"height"`
+	DeviceScaleFactor float64 `json:"deviceScaleFactor"`
+	Owner             string  `json:"owner"`
 }
 type Selection struct {
 	Anchor       string `json:"anchor"`
@@ -96,6 +109,7 @@ type Dialog struct {
 	Default string `json:"default,omitempty"`
 }
 type peer struct {
+	id     string
 	conn   *websocket.Conn
 	queue  chan Message
 	cancel context.CancelFunc
@@ -109,6 +123,7 @@ type live struct {
 	full          bool
 	mode          string
 	dialog        *Dialog
+	viewport      *Viewport
 }
 type Server struct {
 	mu         sync.Mutex
@@ -366,7 +381,7 @@ func first(c *websocket.Conn, r *http.Request) (Message, error) {
 }
 func newPeer(c *websocket.Conn, r *http.Request) *peer {
 	ctx, cancel := context.WithCancel(r.Context())
-	p := &peer{conn: c, queue: make(chan Message, 32), cancel: cancel}
+	p := &peer{id: randomID(), conn: c, queue: make(chan Message, 32), cancel: cancel}
 	go func() {
 		defer cancel()
 		defer c.CloseNow()
@@ -444,6 +459,8 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			if se.AgentID == id {
 				s.clearAssets(s.live[sid])
 				s.live[sid].dialog = nil
+				s.live[sid].viewport = nil
+				s.broadcast(sid, Message{Type: "viewport"})
 				s.live[sid].document = documentState{}
 				s.live[sid].status = "offline"
 				s.broadcast(sid, Message{Type: "status", Status: "offline", Detail: "共享浏览器已断开，正在等待自动重连"})
@@ -472,6 +489,11 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 		case "raster":
 			if m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
 				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Full: m.Full})
+			}
+		case "viewport":
+			if m.Viewport == nil || (validViewport(m.Viewport.Width, m.Viewport.Height, m.Viewport.DeviceScaleFactor) && identifier.MatchString(m.Viewport.Owner)) {
+				s.live[se.ID].viewport = m.Viewport
+				s.broadcast(se.ID, Message{Type: "viewport", Viewport: m.Viewport})
 			}
 		case "mode":
 			if m.Mode == "dom" || m.Mode == "raster" {
@@ -534,6 +556,8 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	p := newPeer(c, r)
 	defer p.cancel()
 	l.viewers[p] = true
+	send(p, Message{Type: "joined", ViewerID: p.id})
+	send(p, Message{Type: "viewport", Viewport: l.viewport})
 	s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 	send(p, Message{Type: "status", Status: l.status, URL: se.URL, Title: se.Title})
 	assets := make([]AssetMeta, 0, len(l.resources))
@@ -558,6 +582,13 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(l.viewers, p)
+		if l.viewport != nil && l.viewport.Owner == p.id {
+			l.viewport = nil
+			s.broadcast(id, Message{Type: "viewport"})
+			if a := s.agents[se.AgentID]; a != nil {
+				send(a, Message{Type: "input", SessionID: id, Input: &Input{Action: "viewportRelease", ViewerID: p.id}})
+			}
+		}
 		s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 		if len(l.viewers) == 0 {
 			l.document = documentState{}
@@ -597,6 +628,9 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 			if m.Type == "retry" {
 				send(a, Message{Type: "open", Session: safeSession(se)})
 			} else {
+				if m.Input.Action == "viewport" || m.Input.Action == "restoreViewport" {
+					m.Input.ViewerID = p.id
+				}
 				send(a, Message{Type: "input", SessionID: id, Input: m.Input})
 			}
 		}
@@ -642,6 +676,10 @@ func validInput(i *Input) bool {
 		return identifier.MatchString(i.DialogID)
 	case "closePopup":
 		return true
+	case "viewport":
+		return validViewport(i.Width, i.Height, i.DeviceScaleFactor)
+	case "restoreViewport":
+		return true
 	case "navigate":
 		_, err := canonical(i.URL)
 		return err == nil && len(i.URL) <= 8192
@@ -649,6 +687,9 @@ func validInput(i *Input) bool {
 		return true
 	}
 	return false
+}
+func validViewport(width, height int, dpr float64) bool {
+	return width >= 320 && width <= 3840 && height >= 240 && height <= 2160 && !math.IsNaN(dpr) && !math.IsInf(dpr, 0) && dpr >= 1 && dpr <= 2 && float64(width)*dpr <= 4096 && float64(height)*dpr <= 4096 && float64(width)*float64(height)*dpr*dpr <= 8294400
 }
 func (s *Server) Close() {
 	s.mu.Lock()
