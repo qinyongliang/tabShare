@@ -1,0 +1,20 @@
+services:
+  tabshare:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["-public-url", "https://${TABSHARE_DOMAIN:?Set your public hostname}"]
+    volumes: ["sessions:/data"]
+    restart: unless-stopped
+  caddy:
+    image: caddy:2.10-alpine
+    environment:
+      TABSHARE_DOMAIN: ${TABSHARE_DOMAIN:?Set your public hostname}
+    ports: ["80:80", "443:443"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
+    restart: unless-stopped
+    depends_on: [tabshare]
+volumes:
+  sessions:
+  caddy-data:
+  caddy-config:

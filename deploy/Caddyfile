@@ -1,0 +1,3 @@
+{$TABSHARE_DOMAIN} {
+    reverse_proxy tabshare:8080
+}

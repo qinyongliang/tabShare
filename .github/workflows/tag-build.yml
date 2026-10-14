@@ -1,0 +1,108 @@
+name: Build tagged version
+
+on:
+  push:
+    tags:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test server and extension controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  server:
+    name: Server / ${{ matrix.goos }} / ${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    env:
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      BUILD_REF: ${{ github.ref }}
+      BUILD_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache-dependency-path: go.sum
+      - name: Build server and package with checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package dist
+          executable=tabshare
+          if [[ "$GOOS" == windows ]]; then executable=tabshare.exe; fi
+          go build -mod=readonly -trimpath -o "package/$executable" ./cmd/tabshare
+          cp README.md package/
+          printf '%s\n' "ref=$BUILD_REF" "commit=$BUILD_COMMIT" > package/BUILD.txt
+          archive="tabshare-$GOOS-$GOARCH"
+          if [[ "$GOOS" == windows ]]; then
+            (cd package && zip -q -r "../dist/$archive.zip" .)
+          else
+            tar -czf "dist/$archive.tar.gz" -C package .
+          fi
+          (cd dist && sha256sum "$archive".* > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tabshare-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  extension:
+    name: Chrome extension
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package unpacked extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/tabshare-extension.zip', 'w', ZIP_DEFLATED) as archive:
+              for file in sorted(Path('extension').rglob('*')):
+                  if file.is_file():
+                      archive.write(file, file.relative_to('extension'))
+          PY
+          (cd dist && sha256sum tabshare-extension.zip > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tabshare-extension
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

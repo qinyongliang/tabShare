@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>TabShare 设置</title><link rel="stylesheet" href="ui.css"></head>
+<body class="options"><main><div class="mark">TS</div><h1>连接你的浏览器</h1><p>配置一次，之后访问分享链接即可控制你主动共享的标签页。</p>
+<form id="settings"><label>Go 服务器地址<input id="server" type="url" placeholder="https://tabs.example.com" required></label>
+<label>配对令牌<input id="token" type="password" autocomplete="off" required placeholder="服务器 data/admin-token 文件中的令牌"></label>
+<label class="check"><input id="enabled" type="checkbox">允许自动连接到我的服务器</label>
+<p class="hint">开启后，已创建的网址共享可以在访客连接时自动打开。Chrome 调试提示会保持可见；关闭此选项可暂停所有远程访问。</p>
+<button type="submit">保存并连接</button><p id="result" role="status"></p></form>
+<p class="hint">公网使用 HTTPS。本机开发可填 http://localhost:8080。配对令牌只保存在此扩展的本地存储中，请仅连接你信任的服务器。</p></main><script type="module" src="options.js"></script></body></html>

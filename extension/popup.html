@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>TabShare</title><link rel="stylesheet" href="ui.css"></head>
+<body class="popup"><main><header><span class="mark">TS</span><strong>TabShare</strong><button id="settings" class="quiet">设置</button></header>
+<h1>共享一个真实标签页</h1><p>多人共用同一个页面和登录状态。</p>
+<button id="share-tab">共享当前标签页</button><p class="hint">此标签页关闭后，分享停止。</p>
+<form id="share-url"><label>共享网址<input id="url" type="url" required placeholder="https://example.com/"></label><button type="submit" class="secondary">创建可复用的网址分享</button></form>
+<p class="hint">再次访问复用原标签页；关闭后自动新开。持有完整链接的人可控制页面，请仅分享给可信的人。</p>
+<p id="result" role="status"></p><section id="shares"></section></main><script type="module" src="popup.js"></script></body></html>
