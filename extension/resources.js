@@ -48,7 +48,7 @@ export class ResourceBridge {
             if(request.kind==='font'){const magic=new TextDecoder().decode(bytes.subarray(0,4));mime=magic==='wOF2'?'font/woff2':magic==='wOFF'?'font/woff':magic==='OTTO'?'font/otf':'font/ttf';}
             item={bytes,mime,sent:new Set()};this.bytesRetained+=bytes.length;this.done.set(request.id,item);
           }
-          for(const id of sessions){if(item.sent.has(id))continue;const response=await fetch(config.server+'/api/resources/'+encodeURIComponent(id)+'/'+encodeURIComponent(request.id),{method:'POST',headers:{Authorization:'Bearer '+config.pairingToken,'Content-Type':item.mime||'application/octet-stream'},body:item.bytes});if(response.ok)item.sent.add(id);else throw new Error('Resource relay rejected upload');}
+          for(const id of sessions){if(config.deliver&&!await config.deliver(id,request.id,item))continue;if(item.sent.has(id))continue;const response=await fetch(config.server+'/api/resources/'+encodeURIComponent(id)+'/'+encodeURIComponent(request.id),{method:'POST',headers:{Authorization:'Bearer '+config.pairingToken,'Content-Type':item.mime||'application/octet-stream'},body:item.bytes});if(response.ok)item.sent.add(id);else throw new Error('Resource relay rejected upload');}
           // Separate resource budget: at most 256 KiB/s after the current bounded object.
           await new Promise(resolve=>setTimeout(resolve,Math.min(30000,item.bytes.length/262144*1000)));
         } catch {if(!this.disposed&&generation===this.generation)await this.evaluate('globalThis.__tabShareDOM.resourceFailed('+JSON.stringify(request.id)+')').catch(()=>{});}

@@ -1,12 +1,15 @@
 export class Resources {
   constructor(session,key,ready){this.session=session;this.key=key;this.ready=ready;this.urls=new Map();this.hashes=new Map();this.pending=new Map();this.bytes=0;this.reserved=0;this.sizes=new Map();this.controller=new AbortController();}
-  async add(meta) {
+  async add(meta, directBytes) {
     if(this.urls.has(meta.id)||this.pending.has(meta.id)||meta.size>8*1024*1024||meta.size<1)return;
     if(this.bytes+this.reserved+meta.size>32*1024*1024)return;
     if(!/^(image\/(png|jpeg|gif|webp|avif|svg\+xml|bmp|x-icon)|font\/(woff2?|ttf|otf)|application\/font-woff)$/.test(meta.mime))return;
     this.reserved+=meta.size;const job=(async()=>{
-      const response=await fetch('/api/resources/'+encodeURIComponent(this.session)+'/'+encodeURIComponent(meta.id),{headers:{Authorization:'Bearer '+this.key},signal:this.controller.signal});if(!response.ok)return;
-      const bytes=await response.arrayBuffer();if(bytes.byteLength!==meta.size)return;
+      let bytes;
+      if(directBytes)bytes=directBytes.buffer.slice(directBytes.byteOffset,directBytes.byteOffset+directBytes.byteLength);
+      else {const response=await fetch('/api/resources/'+encodeURIComponent(this.session)+'/'+encodeURIComponent(meta.id),{headers:{Authorization:'Bearer '+this.key},signal:this.controller.signal});if(!response.ok)return;
+      bytes=await response.arrayBuffer();}
+      if(bytes.byteLength!==meta.size)return;
       const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');if(hash!==meta.sha256||this.version&&!meta.id.startsWith(this.version+'_'))return;
       let url=this.hashes.get(hash);
       if(!url){let data=bytes;

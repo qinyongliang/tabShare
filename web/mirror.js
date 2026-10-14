@@ -26,7 +26,7 @@ export class Mirror {
       }
     }
     for(const [id,state] of this.states){const n=this.nodes.get(id);if(n?.isConnected&&n.nodeType===1){if(n.tagName==='DIALOG'&&typeof state.modal==='boolean'){if(state.modal&&!n.matches(':modal')){n.removeAttribute('open');try{n.showModal();}catch{}}else if(!state.modal&&n.matches(':modal'))n.close();}if(typeof state.popoverOpen==='boolean')try{if(state.popoverOpen&&!n.matches(':popover-open'))n.showPopover();else if(!state.popoverOpen&&n.matches(':popover-open'))n.hidePopover();}catch{}}}
-    this.meta = delta.meta;
+    this.meta = delta.meta;this.sequence=delta.sequence;
     return true;
   }
   properties(node, data,remember=true) {

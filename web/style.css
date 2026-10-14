@@ -7,3 +7,5 @@
 @media(max-width:650px){.toolbar{flex-wrap:wrap;gap:7px}#navigation{flex-basis:100%;order:1}#address{font-size:16px}#retry{margin-left:auto}.toolbar button{min-height:40px}#stage{padding:4px}.connection{padding:8px}#share-settings-toggle{padding:10px 13px}footer{gap:8px}}
 
 .viewer.immersive .connection,.viewer.immersive footer,.viewer.immersive .toolbar>*:not(#fullscreen){display:none}.viewer.immersive .toolbar{position:fixed;left:8px;top:8px;z-index:1001;background:transparent;border:0;padding:0;pointer-events:none}.viewer.immersive #fullscreen{pointer-events:auto;background:#fffffff0}.viewer.immersive #stage{padding:0}.viewer.immersive #share-settings-toggle{bottom:calc(16px + env(safe-area-inset-bottom))}.viewer.immersive #share-settings{bottom:calc(70px + env(safe-area-inset-bottom));max-height:calc(100dvh - 95px)}
+
+#stream{position:absolute;inset:0;object-fit:fill;pointer-events:none;background:#111}#fallback{position:relative;z-index:1}

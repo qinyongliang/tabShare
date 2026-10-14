@@ -19,4 +19,20 @@
 
 一轮动画样例测试在 2.1 秒内发送 5 个差异包，约 2.5 KB。1500 节点页面中的单节点增量合并 microbenchmark 约 2.4 μs/次、953 B 分配/次。这些是当前机器和测试页面的结果，不代表任意网站或并发规模的性能保证；初始结构、图片和画面降级流量另计。
 
-云机器的管理员策略 `ExtensionInstallBlocklist: ["*"]` 禁止加载自定义扩展，实际加载尝试被拒绝。因此浏览器集成用 Chrome API 适配器运行未经改写的 worker 主体，连接真实 CDP。没有修改系统策略。扩展加载、权限提示、MV3 后台存活及用户电脑环境仍需在允许开发者扩展的 Chrome 中验证。Docker/Caddy 公网部署为可选配置，本任务没有执行公网部署或验证证书签发。
+云机器的管理员策略 `ExtensionInstallBlocklist: ["*"]` 禁止加载自定义扩展，实际加载尝试被拒绝。`WebRtcIPHandling: disable_non_proxied_udp` 也禁止直接 UDP 协商。因此浏览器集成用 Chrome API 适配器运行未经改写的 worker 主体，连接真实 CDP。没有修改系统策略。扩展加载、权限提示、MV3 后台存活及用户电脑环境仍需在允许开发者扩展的 Chrome 中验证。Docker/Caddy 公网部署为可选配置，本任务没有执行公网部署或验证证书签发。
+
+## 0.4 WebRTC 验证
+
+Go race / vet、14 项 Node 检查、独立 TURN fixture 构建与 vet、tag 工作流 actionlint 和 Compose 配置解析均通过。分别执行了 `TEST_RTC=0 npm run test:e2e` 和 `TEST_TURN=1 npm run test:e2e`，两套完整浏览器检查均通过。
+
+WebRTC 检查运行真实浏览器中的原始 offscreen 模块及 RTCPeerConnection，使用仅监听回环地址的 Pion TURN/TCP fixture。测试仅把 PeerConnection 的 ICE 策略设置为 relay 以确定性验证 TURN，不修改 Chrome 管理员策略。生产连接继续优先直连。验证了：
+
+- 两名访客通过可靠 DataChannel 操作同一标签页；DOM 差异和输入不经 Go WebSocket 转发。
+- 源 Cookie 资源读取后，SVG 图片、背景图和 TTF 字体通过二进制 DataChannel 到达；检查这段期间 Go 资源上传数量没有增加。
+- 主动关闭真实 PeerConnection 后，恢复完整兜底 DOM，原标签页仍可操作，并在无所有者操作时自动重新协商 WebRTC。
+- 手机视口与 DPR=2、视频触控、横竖屏、多人尺寸驱动、恢复布局；DOM 与视频模式切换、诱导弹出页和返回。
+- Canvas 区域视频和点击，重叠浮层切换整页视频，移除后恢复区域。CDP 在真实源页持续绘制 Canvas，访客在 2.1 秒解码 21 帧，超过应急截图每秒 2 帧限制；这是本机测试结果，30 fps 是目标而非保证。
+- 自动新建的后台标签页视频初始化。无合成帧时自适应补充截图，重复画面跳过；视频经 WebRTC 编码，JPEG 不通过 Go 转发。
+- 视频区域元数据按 DOM 文档版本隔离，导航后不会把旧 Canvas 区域覆盖到新文档的文字或富文本节点。
+
+直接 UDP 穿透、真实公网 TURN/coturn 防火墙、原生 tabCapture 授权及 MV3 offscreen 文档生命周期未在此云策略环境验证。原生 tabCapture 路径提供实现，需所有者在允许安装扩展的本机 Chrome 检查；无人值守重开的网址页采用调试视频来源。Compose 的可选 coturn profile 已校验配置，没有在公网启动。

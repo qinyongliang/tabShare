@@ -1,3 +1,4 @@
+import {DocumentState} from '../extension/document-state.js';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdtemp, readFile, rm, mkdir} from 'node:fs/promises';
@@ -6,18 +7,22 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import vm from 'node:vm';
-import {serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame} from '../extension/controller.js';
+import {serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput} from '../extension/controller.js';
 import {installDOM,captureDOM} from '../extension/dom-capture.js';
 import {ResourceBridge} from '../extension/resources.js';
 import {chromium} from 'playwright-core';
 
+const rtcEnabled=process.env.TEST_RTC!=='0';
 const root = path.resolve(import.meta.dirname, '..');
 const temporary = await mkdtemp(path.join(tmpdir(), 'tabshare-e2e-'));
 const browserPath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
-let source, server, visitors, cdp, fixture, assets, shutdownAgent;
+let source, server, visitors, cdp, fixture, assets, shutdownAgent,turnFixture,videoAnimation;
+let turnPort;const turnSecret=crypto.randomUUID(),useTURN=rtcEnabled&&process.env.TEST_TURN==='1';
 let assetOrigin;const assetHits=[];
 const timers=new Set();
 let serverLog = '', sourceLog = '';
+let resourceUploads=0,relayDocuments=0,relayInputs=0;
+const originalFetch=globalThis.fetch;globalThis.fetch=(url,options)=>{if(String(url).includes('/api/resources/')&&options?.method==='POST')resourceUploads++;return originalFetch(url,options);};
 const state = {clicks: 0, text: '', loads: 0, path: '', cookie: '', scroll: 0, choice:'a', checked:false, canvasClicks:0};
 async function until(check, label, timeout = 15000) {
   const end = Date.now() + timeout;
@@ -55,7 +60,7 @@ async function stop(process) {
 const listen = await freePort();
 const origin = `http://localhost:${listen}`;
 function startServer() {
-  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin], {cwd: root, stdio: ['ignore', 'ignore', 'pipe']});
+  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin,'-stun',''], {cwd: root,env:{...process.env,TABSHARE_TURN_URLS:useTURN?'turn:127.0.0.1:'+turnPort+'?transport=tcp':'',TABSHARE_TURN_SECRET:useTURN?turnSecret:''}, stdio: ['ignore', 'ignore', 'pipe']});
   server.stderr.on('data', data => { serverLog += data.toString(); });
 }
 try {
@@ -66,6 +71,7 @@ try {
     res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#ea5685"/></svg>');
   });await new Promise(resolve=>assets.listen(0,'127.0.0.1',resolve));assetOrigin=`http://127.0.0.1:${assets.address().port}`;
   fixture = http.createServer(async (req, res) => {
+    if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}
     if (req.url === '/event' && req.method === 'POST') {
       let text = ''; for await (const chunk of req) text += chunk;
       Object.assign(state, JSON.parse(text)); res.end('ok'); return;
@@ -89,6 +95,7 @@ try {
   });
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
   const sourceURL = `http://127.0.0.1:${fixture.address().port}/fixture`;
+  if(useTURN){turnPort=await freePort();let ready=false;turnFixture=spawn(path.join(root,'bin/test-turn'),['-listen','127.0.0.1:'+turnPort],{env:{...process.env,TABSHARE_TEST_TURN_SECRET:turnSecret},stdio:['ignore','ignore','pipe']});turnFixture.stderr.on('data',data=>{if(data.toString().includes('ready'))ready=true;});await until(()=>ready,'loopback TURN/TCP fixture');}
   startServer(); await until(async () => (await fetch(origin + '/healthz')).ok, 'Go service');
   const token = (await readFile(path.join(temporary, 'data/admin-token'), 'utf8')).trim();
   const profile = path.join(temporary, 'chrome'); await mkdir(profile);
@@ -100,14 +107,14 @@ try {
   cdp=new CDP(`ws://127.0.0.1:${info[0]}${info[1]}`);
   await cdp.call('Target.setDiscoverTargets',{discover:true});
   const listeners=()=>({list:[],addListener(fn){this.list.push(fn);},fire(...args){for(const fn of this.list)fn(...args);}});
-  const ids=new Map(),sessions=new Map(),actions=[];let nextId=0;
+  const ids=new Map(),sessions=new Map(),actions=[],videoCommands=[],videoGeometries=[];let sourceFrames=0,offscreenFrames=0;let nextId=0,offscreenSession,offscreenTarget;
   const tabEvents={onCreated:listeners(),onRemoved:listeners(),onUpdated:listeners()},debugEvents={onEvent:listeners(),onDetach:listeners()};
-  async function getTabs(){const targets=(await cdp.call('Target.getTargets')).targetInfos.filter(t=>t.type==='page');return targets.map(t=>{if(!ids.has(t.targetId))ids.set(t.targetId,++nextId);return{id:ids.get(t.targetId),url:t.url,title:t.title,targetId:t.targetId};});}
+  async function getTabs(){const targets=(await cdp.call('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.targetId!==offscreenTarget);return targets.map(t=>{if(!ids.has(t.targetId))ids.set(t.targetId,++nextId);return{id:ids.get(t.targetId),url:t.url,title:t.title,targetId:t.targetId};});}
   async function getTab(id){const tab=(await getTabs()).find(t=>t.id===id);if(!tab)throw new Error('tab closed');return tab;}
   const messages=listeners(),local={},sessionStorage={},packets=[],receivedInputs=[];
   const chrome={
     tabs:{...tabEvents,query:getTabs,get:getTab,remove:async id=>{const tab=await getTab(id);await cdp.call('Target.closeTarget',{targetId:tab.targetId});},create:async({url,active})=>{const created=await cdp.call('Target.createTarget',{url,background:!active});return until(async()=>(await getTabs()).find(t=>t.targetId===created.targetId),'new tab');},reload:async id=>{await cdp.call('Page.reload',{},sessions.get(id));}},
-    debugger:{...debugEvents,attach:async({tabId})=>{const tab=await getTab(tabId);const r=await cdp.call('Target.attachToTarget',{targetId:tab.targetId,flatten:true});sessions.set(tabId,r.sessionId);},detach:async({tabId})=>{const sessionId=sessions.get(tabId);sessions.delete(tabId);if(sessionId)await cdp.call('Target.detachFromTarget',{sessionId});},sendCommand:async({tabId},method,params)=>{if(method==='Runtime.evaluate'&&params.expression.includes('__tabShareDOM.act(')){actions.push(JSON.parse(params.expression.slice(params.expression.indexOf('.act(')+5,-1)).action);}return cdp.call(method,params,sessions.get(tabId));}},
+    debugger:{...debugEvents,attach:async({tabId})=>{const tab=await getTab(tabId);const r=await cdp.call('Target.attachToTarget',{targetId:tab.targetId,flatten:true});sessions.set(tabId,r.sessionId);},detach:async({tabId})=>{const sessionId=sessions.get(tabId);sessions.delete(tabId);if(sessionId)await cdp.call('Target.detachFromTarget',{sessionId});},sendCommand:async({tabId},method,params)=>{if(method.includes('Screencast'))videoCommands.push(method);if(method==='Runtime.evaluate'&&params.expression.includes('__tabShareDOM.act(')){actions.push(JSON.parse(params.expression.slice(params.expression.indexOf('.act(')+5,-1)).action);}return cdp.call(method,params,sessions.get(tabId));}},
     storage:{local:{get:async keys=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,structuredClone(local[k])])),set:async values=>Object.assign(local,structuredClone(values))},session:{get:async key=>({[key]:sessionStorage[key]}),set:async values=>Object.assign(sessionStorage,values)}},
     runtime:{id:'test-profile',onMessage:messages,onStartup:listeners()},alarms:{create(){},onAlarm:listeners()}
   };
@@ -115,15 +122,51 @@ try {
     if(m.method==='Target.targetCreated'&&m.params.targetInfo.type==='page'&&m.params.targetInfo.openerId){const t=m.params.targetInfo;void getTabs().then(()=>tabEvents.onCreated.fire({id:ids.get(t.targetId),openerTabId:ids.get(t.openerId),url:t.url}));}
     if(m.method==='Target.targetDestroyed'){const id=ids.get(m.params.targetId);if(id){tabEvents.onRemoved.fire(id);debugEvents.onDetach.fire({tabId:id},'target_closed');}}
     const tabId=[...sessions].find(([,session])=>session===m.sessionId)?.[0];
-    if(tabId)debugEvents.onEvent.fire({tabId},m.method,m.params);
+    if(m.method==='Page.screencastFrame')sourceFrames++;if(tabId)debugEvents.onEvent.fire({tabId},m.method,m.params);
   });
-  class AgentSocket extends WebSocket{constructor(...args){super(...args);this.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.type==='input')receivedInputs.push(m.input);});}send(text){const m=JSON.parse(text);if(m.type==='dom')packets.push({at:Date.now(),document:m.document,bytes:Buffer.byteLength(text)});return super.send(text);}}
+  class AgentSocket extends WebSocket{constructor(...args){super(...args);this.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.type==='input'){relayInputs++;receivedInputs.push(m.input);}});}send(text){const m=JSON.parse(text);if(m.type==='dom'){relayDocuments++;packets.push({at:Date.now(),document:m.document,bytes:Buffer.byteLength(text)});}return super.send(text);}}
   Object.assign(local,{server:origin,pairingToken:token,enabled:true});
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
+
+  if(rtcEnabled){
+    chrome.runtime.getContexts=async()=>offscreenSession?[{contextType:'OFFSCREEN_DOCUMENT'}]:[];
+    chrome.offscreen={createDocument:async()=>{
+      const t=await cdp.call('Target.createTarget',{url:'about:blank',background:true});offscreenTarget=t.targetId;
+      offscreenSession=(await cdp.call('Target.attachToTarget',{targetId:t.targetId,flatten:true})).sessionId;
+      await cdp.call('Runtime.enable',{},offscreenSession);
+      await cdp.call('Runtime.addBinding',{name:'tabshareRuntime'},offscreenSession);
+      await cdp.call('Page.enable',{},offscreenSession);
+      await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`
+        globalThis.__rtc=[];const RealRTC=RTCPeerConnection;globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(${useTURN}?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};
+        const receivers=[],pending=new Map();let serial=0;
+        globalThis.chrome={runtime:{id:'test-profile',onMessage:{addListener:fn=>receivers.push(fn)},sendMessage:m=>new Promise(resolve=>{const id=++serial;pending.set(id,resolve);tabshareRuntime(JSON.stringify({id,message:m}));})}};
+        globalThis.__resolve=(id,value)=>{pending.get(id)?.(value);pending.delete(id);};
+        globalThis.__request=m=>new Promise(resolve=>{for(const fn of receivers)fn(m,{id:chrome.runtime.id},resolve);});
+        globalThis.__ready=()=>receivers.length>0;
+      `},offscreenSession);
+      await cdp.call('Page.navigate',{url:new URL('/extension/offscreen.html',sourceURL).href},offscreenSession);
+      await until(()=>cdp.evaluate(offscreenSession,'globalThis.__ready?.()'),'real WebRTC offscreen module loads');
+    }};
+    cdp.listeners.push(event=>{
+      if(event.sessionId===offscreenSession&&event.method==='Runtime.consoleAPICalled')console.log('Offscreen console:',event.params.args.map(a=>a.value).join(' '));
+      if(event.sessionId===offscreenSession&&event.method==='Runtime.bindingCalled'){
+        const {id,message}=JSON.parse(event.params.payload);if(message.type==='peer-input'&&message.message?.type==='input')receivedInputs.push(message.message.input);
+        messages.fire(message,{id:chrome.runtime.id},value=>void cdp.evaluate(offscreenSession,'globalThis.__resolve('+id+','+JSON.stringify(value??null)+')').catch(()=>{}));
+      }
+    });
+    chrome.runtime.sendMessage=async m=>{
+      if(m.target==='offscreen'){
+        if(m.type==='frame')offscreenFrames++;if(m.type==='send'&&m.message.type==='video')videoGeometries.push(m.message.info);
+        if(m.type==='send'&&m.message.type==='dom'&&!m.viewerId)packets.push({at:Date.now(),document:m.message.document,bytes:Buffer.byteLength(JSON.stringify(m.message))});
+        return cdp.evaluate(offscreenSession,'globalThis.__request('+JSON.stringify(m)+')').catch(error=>{if(m.type==='frame')console.log('Frame bridge failure:',error.message);throw error;});
+      }
+      return new Promise(resolve=>messages.fire(m,{id:chrome.runtime.id},resolve));
+    };
+  }
   vm.runInNewContext(workerSource,sandbox,{filename:'extension/worker.js'});
   async function request(message){return new Promise(resolve=>{messages.fire(message,{id:chrome.runtime.id},resolve);});}
   shutdownAgent=async()=>{local.enabled=false;await request({type:'reconnect'});for(const timer of timers)clearInterval(timer);};
@@ -139,11 +182,21 @@ try {
   visitors = await chromium.launch({executablePath: browserPath, headless: true, args: ['--no-sandbox']});
   const context = await visitors.newContext({viewport: {width: 1440, height: 1000}});
   const errors = [],viewerInputs=[];
-  async function view(url,viewerContext=context) { const page = await viewerContext.newPage(); page.on('pageerror',e=>errors.push(e.message));page.on('websocket',socket=>socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}})); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
+  async function view(url,viewerContext=context) { const page = await viewerContext.newPage();if(rtcEnabled)await page.addInitScript(forceRelay=>{const RealRTC=RTCPeerConnection;globalThis.__rtc=[];globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(forceRelay?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};},useTURN); page.on('pageerror',e=>errors.push(e.message));if(rtcEnabled)page.on('console',m=>{if(m.text().includes('TabShare RTC'))console.log(m.text());});page.on('websocket',socket=>{socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}});}); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
   const one = await view(share.value.shareUrl);
   const two = await view(share.value.shareUrl);
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
   const remoteOne=one.frameLocator('#mirror'),remoteTwo=two.frameLocator('#mirror');
+  if(rtcEnabled){await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'first viewer real P2P').catch(async error=>{console.log('RTC viewer status:',await one.locator('#status').textContent(),'page errors',errors,'rtc',await one.evaluate(()=>globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))));console.log('Offscreen:',offscreenSession?await cdp.evaluate(offscreenSession,'({ready:globalThis.__ready?.(),rtc:typeof RTCPeerConnection,connections:globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))})'):'not created');throw error;});await until(()=>two.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'second viewer real P2P');console.log('PASS: two authenticated real WebRTC connections via',useTURN?'TURN/TCP':'P2P',', DOM and input DataChannels');}
+  if(rtcEnabled){
+    await cdp.evaluate(offscreenSession,'__rtc[0].close()');
+    await until(()=>one.locator('#status').textContent().then(t=>t.includes('WebSocket 兜底')),'RTC failure switches to WebSocket',12000);
+    const before=state.clicks;await remoteOne.locator('#click').click();await until(()=>state.clicks===before+1,'fallback still controls same source tab');
+    await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'RTC automatically recovers',18000);
+    state.clicks=0;await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'clicks=0'});
+    console.log('PASS: RTC failure, fresh fallback DOM, control continues, automatic WebRTC recovery');
+  }
+  const beforeDirectDOM=relayDocuments,beforeDirectInputs=relayInputs;
   const initial=packets.find(p=>p.document.reset);assert.ok(initial,'one initial DOM snapshot');
   await remoteOne.locator('button').click();await until(()=>state.clicks===1,'first viewer real click');
   await remoteTwo.locator('button').click();await until(()=>state.clicks===2,'second viewer real click');
@@ -152,6 +205,7 @@ try {
   await remoteOne.locator('#text').evaluate(element=>{const data=new DataTransfer();data.setData('text/plain',' pasted');element.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true}));});
   await until(()=>state.text==='hello你好 pasted','remote paste').catch(async error=>{console.log('Paste diagnostic:',{text:state.text,inputs:receivedInputs.filter(i=>i.action==='text').slice(-5),local:await remoteOne.locator('#text').evaluate(e=>({value:e.value,start:e.selectionStart,end:e.selectionEnd}))});throw error;});
   await one.keyboard.press('Backspace');await until(()=>state.text==='hello你好 paste','remote special key').catch(async error=>{console.log('Key diagnostic:',{text:state.text,inputs:receivedInputs.filter(i=>i.action==='keyDown').slice(-2),local:await remoteOne.locator('#text').evaluate(e=>({value:e.value,start:e.selectionStart,end:e.selectionEnd}))});throw error;});
+  await until(()=>packets.some(p=>!p.document.reset),'batched mutation delta arrives');
   const deltas=packets.filter(p=>!p.document.reset);assert.ok(deltas.length,'mutation deltas emitted');
   assert.ok(deltas.every(p=>p.document.nodes.length===0),'typing uses node/property deltas, never full trees');
   assert.ok(Math.max(...deltas.map(p=>p.bytes))<initial.bytes/2,'edits use less bandwidth than a snapshot');
@@ -168,6 +222,7 @@ try {
   const animationPackets=packets.slice(animationStart).filter(p=>!p.document.reset);assert.ok(animationPackets.length<=12,'60 Hz DOM animation coalesced to at most 5 Hz batches');assert.ok(animationPackets.every(p=>p.bytes<2500),'animation sends small property deltas');
   console.log('Animation measurement:',animationPackets.length,'batches in 2.1s,',animationPackets.reduce((n,p)=>n+p.bytes,0),'bytes');
   await until(()=>remoteOne.locator('#text').inputValue().then(v=>v==='hello你好 paste'),'authoritative native input rendering');
+  if(rtcEnabled){assert.equal(relayDocuments,beforeDirectDOM,'DOM edits bypass Go relay');assert.equal(relayInputs,beforeDirectInputs,'input bypasses Go relay');}
   console.log('PASS: native DOM rendering, two viewers, real input/Chinese/paste/keys, sparse deltas, no idle packets');
   const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
   const nativeMetrics=await sourceMetrics();
@@ -199,7 +254,7 @@ try {
   await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"screen.orientation.type==='landscape-primary'",returnByValue:true}).then(r=>r.result.value),'source orientation follows driving viewer');
   await phone.setViewportSize({width:390,height:844});await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'driving viewer rotates back');
   await phone.locator('[name=share-mode][value=raster]').check();await phone.locator('#share-settings-toggle').click();await phone.locator('#fallback').waitFor({state:'visible'});await assertFits(phone);
-  let phoneMetrics=await sourceMetrics();await until(()=>phone.locator('#fallback').evaluate((image,width)=>image.naturalWidth===width*2,phoneMetrics.width),'retina bitmap is twice CSS width');
+  let phoneMetrics=await sourceMetrics();if(rtcEnabled)await until(()=>phone.locator('#stream').evaluate((v,width)=>v.readyState>=2&&v.videoWidth>=width,phoneMetrics.width),'WebRTC video matches CSS resolution').catch(async error=>{console.log('Source frames:',sourceFrames,'offscreen frames:',offscreenFrames,'commands',videoCommands);console.log('Sender tracks:',await cdp.evaluate(offscreenSession,'__rtc.map(p=>p.getSenders().map(s=>s.track?{state:s.track.readyState,enabled:s.track.enabled}:null))'));console.log('Video receiver:',await phone.locator('#stream').evaluate(v=>({width:v.videoWidth,height:v.videoHeight,ready:v.readyState,paused:v.paused,tracks:v.srcObject?.getTracks().map(t=>({state:t.readyState,muted:t.muted}))})));console.log('Media stats:',await cdp.evaluate(offscreenSession,'Promise.all(__rtc.map(async p=>[...(await p.getStats()).values()].filter(s=>s.type==="outbound-rtp").map(s=>({frames:s.framesEncoded,width:s.frameWidth,height:s.frameHeight,bytes:s.bytesSent}))))'));throw error;});else await until(()=>phone.locator('#fallback').evaluate((image,width)=>image.naturalWidth===width*2,phoneMetrics.width),'retina bitmap is twice CSS width');
   const pixels=await phone.locator('#fallback').boundingBox(),tapX=pixels.x+85*pixels.width/phoneMetrics.width,tapY=pixels.y+80*pixels.height/phoneMetrics.height;
   const beforeTouch=state.clicks;await phone.touchscreen.tap(tapX,tapY);await until(()=>state.clicks===beforeTouch+1,'retina raster touch click');
   const gesture=await phoneContext.newCDPSession(phone);const x=pixels.x+pixels.width*.65,startY=pixels.y+pixels.height*.75,endY=pixels.y+pixels.height*.4;
@@ -220,7 +275,7 @@ try {
   await until(()=>state.scroll>0,'real tab scrolling',6000).catch(async error=>{console.log('Scroll wire:',viewerInputs.filter(i=>i.action==='scroll'),receivedInputs.filter(i=>i.action==='scroll'),actions.slice(-5));console.log('Recent deltas:',packets.slice(-4).map(p=>({reset:p.document.reset,root:p.document.root,nodes:p.document.nodes.map(n=>({id:n.id,tag:n.tag})),updates:p.document.updates,removes:p.document.removes})));console.log('Frame:',await one.locator('#mirror').evaluate(f=>({url:f.contentWindow.location.href,body:!!f.contentDocument.body,html:f.contentDocument.documentElement.outerHTML.slice(0,500)})),errors);throw error;});
   await one.close(); await two.close();
   const reused = await view(share.value.shareUrl);
-  const sources = (await cdp.call('Target.getTargets')).targetInfos.filter(t => t.type === 'page' && t.url.startsWith(`http://127.0.0.1:${fixture.address().port}/`));
+  const sources = (await cdp.call('Target.getTargets')).targetInfos.filter(t => t.type === 'page' && t.targetId!==offscreenTarget && t.url.startsWith(`http://127.0.0.1:${fixture.address().port}/`));
   assert.equal(sources.length, 1); assert.equal(sources[0].targetId, sourceTarget.targetId, 'URL share reuses original tab after navigation');
   console.log('PASS: two real viewers, mouse, text/Chinese, paste, keys, scroll, navigation, shared cookies, URL reuse');
   await reused.close(); await cdp.call('Target.closeTarget', {targetId: sourceTarget.targetId});
@@ -231,16 +286,24 @@ try {
   const closed = await context.newPage(); await closed.goto(tabShare.value.shareUrl);
   await until(() => closed.locator('#status').textContent().then(text => text.includes('已关闭')), 'closed tab share remains closed'); await closed.close();
   await chrome.debugger.sendCommand({tabId:(await getTabs()).find(t=>t.targetId===newSources[0].targetId).id},'Runtime.evaluate',{expression:"document.querySelector('#canvas').style.display='block';document.querySelector('#canvas').getContext('2d').fillRect(0,0,200,90)"});
-  const mirroredCanvas=reopened.frameLocator('#mirror').locator('[data-unsupported=canvas]');await mirroredCanvas.locator('img[data-raster]').waitFor();await mirroredCanvas.click();await until(()=>state.canvasClicks===1,'canvas region input controls real tab');
+  const mirroredCanvas=reopened.frameLocator('#mirror').locator('[data-unsupported=canvas]');await mirroredCanvas.locator('[data-raster]').waitFor().catch(async error=>{console.log('Source target states:',vm.runInContext('[...targets].map(([tabId,t])=>({tabId,streaming:t.streaming,frameBusy:t.frameBusy,lastFrame:t.lastFrame}))',sandbox));console.log('Offscreen capture bindings:',await chrome.runtime.sendMessage({target:'offscreen',type:'inspect'}));console.log('Capture frame counts:',sourceFrames,offscreenFrames,videoCommands);console.log('Region geometries:',videoGeometries.slice(-3));console.log('Region video:',await reopened.locator('#stream').evaluate(v=>({ready:v.readyState,width:v.videoWidth,paused:v.paused,track:v.srcObject?.getTracks().map(t=>({state:t.readyState,muted:t.muted}))})));console.log('Region DOM:',await mirroredCanvas.evaluate(n=>({id:n.dataset.nodeId,children:n.children.length,rect:{w:n.getBoundingClientRect().width,h:n.getBoundingClientRect().height}})));console.log('Region errors:',errors.slice(-5));throw error;});await mirroredCanvas.click();await until(()=>state.canvasClicks===1,'canvas region input controls real tab');
   const newTab=(await getTabs()).find(t=>t.targetId===newSources[0].targetId);
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"const overlay=document.createElement('div');overlay.id='overlay';overlay.style.cssText='position:absolute;left:45px;top:365px;width:150px;height:60px;background:red;z-index:99';document.body.append(overlay)"});
   await reopened.locator('#fallback').waitFor({state:'visible'});
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#overlay').remove()"});
   await reopened.locator('#mirror').waitFor({state:'visible'});
-  await until(()=>mirroredCanvas.locator('img[data-raster]').evaluate(image=>{if(!image.complete||!image.naturalWidth)return false;const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);const pixel=ctx.getImageData(20,20,1,1).data;return pixel[0]<10&&pixel[1]<10&&pixel[2]<10;}),'fresh region image after overlay removal');
+  await until(()=>mirroredCanvas.locator('[data-raster]').evaluate(image=>{const canvas=image.tagName==='CANVAS'?image:document.createElement('canvas');if(image.tagName!=='CANVAS'){if(!image.complete||!image.naturalWidth)return false;canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;}const ctx=canvas.getContext('2d');if(image.tagName!=='CANVAS')ctx.drawImage(image,0,0);const pixel=ctx.getImageData(20,20,1,1).data;return pixel[0]<10&&pixel[1]<10&&pixel[2]<10;}),'fresh region image after overlay removal');
+  if(rtcEnabled){
+    // CDP drives real canvas changes without relying on hidden-tab JS timer scheduling.
+    let drawing=false,videoAnimationError;videoAnimation=setInterval(async()=>{if(drawing)return;drawing=true;try{await cdp.evaluate(sessions.get(newTab.id),"(()=>{const c=document.querySelector('#canvas'),ctx=c.getContext('2d');ctx.fillStyle='rgb('+Math.floor(Math.random()*255)+',0,0)';ctx.fillRect(0,0,200,90)})()");}catch(error){videoAnimationError=error;}finally{drawing=false;}},33);
+    const start=await reopened.locator('#stream').evaluate(v=>v.getVideoPlaybackQuality().totalVideoFrames);
+    await new Promise(resolve=>setTimeout(resolve,2100));const end=await reopened.locator('#stream').evaluate(v=>v.getVideoPlaybackQuality().totalVideoFrames);
+    clearInterval(videoAnimation);if(videoAnimationError)throw videoAnimationError;assert.ok(end-start>12,'video exceeds emergency screenshot cap');console.log('PASS: continuous encoded WebRTC video:',end-start,'decoded frames in 2.1 s');
+  }
   console.log('PASS: canvas region pixels and real input; overlapping overlay switches to full frame then restores DOM');
   await reopened.screenshot({path:path.join(root,'test-results/shared-dom.png')});
   console.log('PASS: URL share reopens a closed tab; tab-only share never opens replacement');
+  const beforeDirectResources=resourceUploads;
   await reopened.locator('#address').fill(sourceURL.replace('/fixture','/compat'));await reopened.locator('#address').press('Enter');
   const compatibility=reopened.frameLocator('#mirror');await compatibility.locator('#closed-button').waitFor({state:'visible'});
   assert.equal(await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#shadow-host').shadowRoot===null",returnByValue:true}).then(r=>r.result.value),true,'fixture uses a closed shadow root');
@@ -252,6 +315,7 @@ try {
   assert.equal(await compatibility.locator('#badge').evaluate(e=>getComputedStyle(e,'::before').content),'"★"','pseudo element content');
   await until(()=>compatibility.locator('#badge').evaluate(e=>[...e.ownerDocument.fonts].some(f=>f.family==='SharedFont'&&f.status==='loaded')),'cross-origin font face loaded',20000).catch(async error=>{console.log('Resource reads:',resourceReads);console.log('Font styles:',await compatibility.locator('#badge').evaluate(e=>({fonts:[...e.ownerDocument.fonts].map(f=>({family:f.family,status:f.status})),styles:[...e.ownerDocument.styleSheets].flatMap(s=>[...s.cssRules].map(r=>r.cssText)).filter(r=>r.includes('font-face'))})));throw error;});
   assert.ok(await compatibility.locator('#background').evaluate(e=>getComputedStyle(e).backgroundImage.startsWith('url("blob:')),'CSS image forwarded');
+  if(rtcEnabled)assert.equal(resourceUploads,beforeDirectResources,'cross-origin images and font bytes bypass Go relay');
   // The rich editor has no source scripts in the mirror. Range replacement runs trusted input on the source.
   await compatibility.locator('#rich').evaluate(e=>{e.focus();const s=e.ownerDocument.getSelection();s.setBaseAndExtent(e.querySelector('strong').firstChild,2,e.querySelector('em').firstChild,3);});
   await reopened.keyboard.insertText('你好');await until(()=>state.richText==='al你好vo','rich text range spans nested elements');assert.equal(state.trusted,true,'rich text uses trusted CDP editing');
@@ -292,8 +356,9 @@ try {
   console.error('Source browser:', sourceLog);
   process.exitCode = 1;
 } finally {
+  clearInterval(videoAnimation);
   await shutdownAgent?.().catch(()=>{});for(const timer of timers)clearInterval(timer);
-  cdp?.close(); await visitors?.close(); await stop(source).catch(() => {}); await stop(server).catch(() => {});
+  cdp?.close(); await visitors?.close(); await stop(source).catch(() => {}); await stop(server).catch(() => {});await stop(turnFixture).catch(()=>{});
   await new Promise(resolve => fixture ? fixture.close(resolve) : resolve());
   await new Promise(resolve=>assets?assets.close(resolve):resolve());
   await rm(temporary, {recursive: true, force: true});

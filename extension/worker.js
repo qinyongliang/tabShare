@@ -1,4 +1,5 @@
-import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame} from './controller.js';
+import {DocumentState} from './document-state.js';
+import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame, validPeerInput} from './controller.js';
 import {installDOM, captureDOM} from './dom-capture.js';
 import {ResourceBridge} from './resources.js';
 
@@ -6,8 +7,99 @@ let config, socket, connecting, retryTimer;
 const bindings = new Map();
 const targets = new Map();
 const opening = new Map();
+const peers = new Map(), nativeTabs = new Set();
+let offscreenOpening,offscreenReady=false;
+async function offscreen(message) {
+  if(!chrome.offscreen)return false;
+  if(!offscreenReady&&!offscreenOpening)offscreenOpening=(async()=>{
+    const contexts=await chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']});
+    if(!contexts.length)await chrome.offscreen.createDocument({url:'offscreen.html',reasons:['WEB_RTC','USER_MEDIA'],justification:'Shared-tab WebRTC video and authenticated peer data channels'});
+    offscreenReady=true;
+  })().finally(()=>{offscreenOpening=null;});
+  await offscreenOpening;
+  try{return await chrome.runtime.sendMessage({target:'offscreen',...message});}catch(error){offscreenReady=false;throw error;}
+}
+function roomPeers(id){return [...peers.values()].filter(p=>p.sessionId===id);}
+function publish(message) {
+  const members=roomPeers(message.sessionId);
+  if(members.some(p=>p.direct))void offscreen({type:'send',sessionId:message.sessionId,message}).catch(()=>{});
+  if(members.some(p=>!p.direct)||!members.length)return transmit(message);
+  return true;
+}
+function resourceConfig(){return {server:serverOrigin(config.server),pairingToken:config.pairingToken,deliver:async(id,asset,item)=>{
+  for(const p of roomPeers(id).filter(p=>p.direct)){
+    const sent=id+':'+p.viewerId;if(item.sent.has(sent))continue;
+    let raw='';for(let n=0;n<item.bytes.length;n+=4096)raw+=String.fromCharCode(...item.bytes.subarray(n,n+4096));
+    const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',item.bytes)),n=>n.toString(16).padStart(2,'0')).join('');
+    const ok=await offscreen({type:'asset',sessionId:id,viewerId:p.viewerId,meta:{id:asset,mime:item.mime,size:item.bytes.length,sha256},data:btoa(raw)});
+    if(ok)item.sent.add(sent);
+  }
+  return !roomPeers(id).length||roomPeers(id).some(p=>!p.direct);
+}};}
+async function peerJoined(m) {
+  const binding=bindings.get(m.sessionId);if(!binding)return;
+  peers.set(m.sessionId+':'+m.viewerId,{...m,direct:false});
+  await offscreen({...m,tabId:binding.tabId});
+}
+async function peerLeft(m) {
+  peers.delete(m.sessionId+':'+m.viewerId);
+  await offscreen({...m,type:'peer-left'}).catch(()=>{});
+  const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);
+  if(t?.viewport?.owner===m.viewerId)await resizeViewport(b.tabId,null);
+}
+async function peerState(m) {
+  const p=peers.get(m.sessionId+':'+m.viewerId);if(!p||m.attempt&&p.attempt&&m.attempt!==p.attempt)return;
+  if(m.status==='down')setTimeout(()=>{if(peers.get(m.sessionId+':'+m.viewerId)===p&&!p.direct)schedule(()=>peerJoined(p));},5000);
+  p.direct=m.status==='up';transmit({type:'transport',sessionId:m.sessionId,viewerId:m.viewerId,status:p.direct?'p2p':'fallback'});
+  const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);if(!t)return;
+  await peerSnapshot(m.sessionId,m.viewerId);
+  if(p.direct)await offscreen({type:'send',sessionId:m.sessionId,viewerId:m.viewerId,message:{type:'mode',mode:t.mode,full:!!t.full}});
+  publish({type:'viewport',sessionId:m.sessionId,viewport:t.viewport});
+  publish({type:'dialog',sessionId:m.sessionId,dialog:t.dialog||null});
+  if(p.direct){const requests=[...t.resources?.done||[]].filter(([,item])=>item.bytes).map(([id])=>({id}));void t.resources?.transfer(requests,t.sessions,resourceConfig());}
+  t.videoGeometry=null;t.nextRaster=0;await raster(b.tabId);
+}
+function peerInput(m) {
+  const p=peers.get(m.sessionId+':'+m.viewerId);if(!p||m.attempt&&p.attempt&&m.attempt!==p.attempt)return;
+  const now=Date.now();p.tokens=Math.min(200,(p.tokens??200)+(now-(p.last??now))*.12);p.last=now;
+  if(--p.tokens<0){void peerLeft(m);return;}
+  if(m.message?.type==='resync'){if(now-(p.lastResync||0)>1000){p.lastResync=now;schedule(()=>peerSnapshot(m.sessionId,m.viewerId));}return;}
+  if(m.message?.type!=='input'||!validPeerInput(m.message.input))return;
+  const input={...m.message.input,viewerId:m.viewerId};
+  const run=()=>control({sessionId:m.sessionId,input}).catch(error=>status(m.sessionId,'error',error.message));
+  if(input.action==='dialog')void run();else schedule(run);
+}
+async function peerSnapshot(sessionId,viewerId) {
+  const b=bindings.get(sessionId),t=b&&targets.get(b.tabId),p=peers.get(sessionId+':'+viewerId);if(!t||!p)return;
+  // Freeze only DOM collection while enqueuing an initial snapshot before future deltas.
+  t.syncing=true;
+  try{while(t.capturing)await new Promise(resolve=>setTimeout(resolve,10));const document=t.document?.snapshot();
+    if(document){if(p.direct)await offscreen({type:'send',sessionId,viewerId,message:{type:'dom',document}});else transmit({type:'dom',sessionId,document});}
+    else {t.syncing=false;await resync(sessionId);}
+  }finally{t.syncing=false;}
+}
+async function backgroundVideo(tabId) {
+  const t=targets.get(tabId);if(!t?.streaming||nativeTabs.has(tabId)||t.frameBusy||Date.now()<(t.nextVideo||0)||Date.now()-(t.lastFrame||0)<500)return;
+  t.frameBusy=true;
+  try{
+    const {data}=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});
+    const changed=data!==t.lastShot;t.videoIdleDelay=changed?33:Math.min(500,(t.videoIdleDelay||33)*1.5);t.lastShot=data;
+    if(changed&&t.streaming)await offscreen({type:'frame',tabId,data});t.nextVideo=Date.now()+t.videoIdleDelay;
+  }catch{/* An inactive/new tab can temporarily have no compositor surface. */}finally{t.frameBusy=false;}
+}
+async function videoState(tabId,active) {
+  const t=targets.get(tabId);if(!t||t.streaming===active)return;
+  t.streaming=active;
+  if(nativeTabs.has(tabId)){await offscreen({type:'active-video',tabId,active});return;}
+  if(active)try{
+    await command(tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:1});
+    // A newly opened background tab may not have produced its first compositor frame yet.
+    if(!t.frameBusy){t.frameBusy=true;try{const seed=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});if(t.streaming){t.lastShot=seed.data;await offscreen({type:'frame',tabId,data:seed.data});}}finally{t.frameBusy=false;}}
+  }catch{t.streaming=false;}
+  else {await command(tabId,'Page.stopScreencast').catch(()=>{});await offscreen({type:'stop-video',tabId}).catch(()=>{});}
+}
 let operationChain = Promise.resolve();
-function schedule(task) { operationChain = operationChain.then(task).catch(() => {}); }
+function schedule(task) { operationChain = operationChain.then(task).catch(error => console.warn('TabShare operation failed:',error.message)); }
 const boot = (async () => {
   let {epoch} = await chrome.storage.session.get('epoch');
   if (!epoch) { epoch = crypto.randomUUID(); await chrome.storage.session.set({epoch}); }
@@ -48,6 +140,9 @@ async function connect() {
         if (message.type === 'open') schedule(() => openSession(message.session));
         if (message.type === 'pause') schedule(() => pause(message.sessionId));
         if (message.type === 'resync') schedule(() => resync(message.sessionId));
+ if(message.type==='peer')schedule(()=>peerJoined(message));
+ if(message.type==='peer-left')schedule(()=>peerLeft(message));
+ if(message.type==='signal')void offscreen(message).catch(()=>{});
         if (message.type === 'input') {
           // Commands from all viewers execute in the same order on this browser.
           const run=()=>control(message).catch(error=>status(message.sessionId,'error',error.message));
@@ -58,7 +153,7 @@ async function connect() {
         clearTimeout(timeout);
         if (!ready) reject(new Error('连接失败，请检查服务器地址和配对令牌'));
         if (socket !== ws) return;
-        socket = null;
+        socket = null;peers.clear();nativeTabs.clear();void offscreen({type:'stop'}).catch(()=>{});
         clearTimeout(retryTimer);
         retryTimer = setTimeout(() => void connect().catch(() => {}), 5000);
         // No viewers can reach this connection; release capture and debugger permissions.
@@ -106,12 +201,12 @@ async function shadows(tabId) {
 async function rememberMode(target,mode) {
   target.mode=mode;const {sessionModes={}}=await chrome.storage.local.get('sessionModes');
   for(const id of target.sessions)sessionModes[id]=mode;await chrome.storage.local.set({sessionModes});
-  for(const id of target.sessions)transmit({type:'mode',sessionId:id,mode,full:mode==='raster'?true:!!target.full});
+  for(const id of target.sessions)publish({type:'mode',sessionId:id,mode,full:mode==='raster'?true:!!target.full});
   target.nextRaster=0;
 }
 async function snapshot(tabId) {
   const target = targets.get(tabId);
-  if (!target || target.capturing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
+  if (!target || target.capturing || target.syncing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
   target.capturing = true;
   try {
     await world(tabId);
@@ -119,9 +214,10 @@ async function snapshot(tabId) {
     if (!delta) return;
     if(delta.meta?.mode!==target.mode)await rememberMode(target,delta.meta.mode);
     const requests=delta.resources;delete delta.resources;
-    if(requests?.length)void target.resources.transfer(requests,target.sessions,{server:serverOrigin(config.server),pairingToken:config.pairingToken});
+    if(!target.pending)target.document.apply(delta);
+    if(requests?.length)void target.resources.transfer(requests,target.sessions,resourceConfig());
     let sent = true;
-    for (const id of target.sessions) sent = transmit({type:'dom', sessionId:id, document:delta}) && sent;
+    for (const id of target.sessions) sent = publish({type:'dom', sessionId:id, document:delta}) && sent;
     if (!sent) { target.pending = delta; return; }
     target.pending = null;
     // Coalesce mutations while paying down a byte budget. Initial state is sent only once.
@@ -138,8 +234,14 @@ async function raster(tabId) {
   target.rasterBusy=true;
   try{
     await world(tabId);
-    const info=await evaluate(tabId,'globalThis.__tabShareDOM.fallback()');
-    if(target.full!==info.full){target.full=info.full;for(const id of target.sessions)transmit({type:'mode',sessionId:id,full:info.full,mode:target.mode});}
+    const info=await evaluate(tabId,'({...globalThis.__tabShareDOM.fallback(),scrollX,scrollY})');
+    info.version=target.document.version;
+    if(target.full!==info.full){target.full=info.full;for(const id of target.sessions)publish({type:'mode',sessionId:id,full:info.full,mode:target.mode});}
+    const direct=[...target.sessions].some(id=>roomPeers(id).some(p=>p.direct));
+    await videoState(tabId,direct&&(info.full||info.regions.length>0));
+    const geometry=JSON.stringify(info);
+    if(target.videoGeometry!==geometry){target.videoGeometry=geometry;for(const id of target.sessions)publish({type:'video',sessionId:id,info});}
+    if(direct&&! [...target.sessions].some(id=>roomPeers(id).some(p=>!p.direct))){target.nextRaster=Date.now()+200;return;}
     let bytes=0;
     const regions=info.full?[{id:'',width:info.width,height:info.height}]:info.regions;
     for(const region of regions){
@@ -149,7 +251,7 @@ async function raster(tabId) {
       bytes+=shot.data.length;
       for(const id of target.sessions)transmit({type:'raster',sessionId:id,nodeId:region.id,full:info.full,data:shot.data,width:region.width,height:region.height});
     }
-    // Fallback pixels are disposable and limited to two frames/s, with their own 64 KiB/s budget.
+    // Only disconnected WebRTC peers use this bounded emergency screenshot transport.
     target.nextRaster=Date.now()+Math.max(500,bytes/65536*1000);
   }catch{/* Navigation can temporarily destroy the isolated world. */}finally{target.rasterBusy=false;}
 }
@@ -174,16 +276,17 @@ async function resync(sessionId) {
 async function targetFor(tab,mode='dom') {
   let target=targets.get(tab.id);if(target)return target;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
-  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode};targets.set(tab.id,target);
+  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode,document:new DocumentState()};targets.set(tab.id,target);
   try{await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
-  target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);return target;
+  target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
 }
 async function switchTab(id,tab,binding) {
   const viewport=targets.get(binding.tabId)?.viewport;
   const mode=targets.get(binding.tabId)?.mode||(await chrome.storage.local.get('sessionModes')).sessionModes?.[id]||'dom';
   await pause(id);
   const target=await targetFor(tab,mode);target.sessions.add(id);bindings.set(id,{...binding,tabId:tab.id});
+  await offscreen({type:'bind',sessionId:id,tabId:tab.id}).catch(()=>{});
   if(viewport)await resizeViewport(tab.id,viewport);
   if(target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;}
   status(id,'connected','',tab);await snapshot(tab.id);
@@ -201,11 +304,12 @@ async function openSession(session) {
       const alreadyRunning=target.sessions.size>0;
       target.sessions.add(session.id);
       bindings.set(session.id, {tabId: tab.id,rootTabId:tab.id,popups:[], session});
+      if(roomPeers(session.id).length)await offscreen({type:'bind',sessionId:session.id,tabId:tab.id}).catch(()=>{});
       const sessionTabs = stored.sessionTabs || {};
       sessionTabs[session.id] = {tabId: tab.id, epoch};
       await chrome.storage.local.set({sessionTabs});
       status(session.id, 'connected', '', tab);
-      if(alreadyRunning&&target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;const requests=[...target.resources.done].filter(([,item])=>item.bytes).map(([id])=>({id}));void target.resources.transfer(requests,target.sessions,{server:serverOrigin(config.server),pairingToken:config.pairingToken});}
+      if(alreadyRunning&&target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;const requests=[...target.resources.done].filter(([,item])=>item.bytes).map(([id])=>({id}));void target.resources.transfer(requests,target.sessions,resourceConfig());}
       await snapshot(tab.id);
     } catch (error) { status(session.id, 'error', error.message); }
   })().finally(() => opening.delete(session.id));
@@ -221,7 +325,8 @@ async function pause(sessionId) {
   target.sessions.delete(sessionId);
   if (target.sessions.size) return;
   clearInterval(target.timer);
-  clearInterval(target.rasterTimer);
+  clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
+  await videoState(binding.tabId,false);nativeTabs.delete(binding.tabId);await offscreen({type:'stop-video',tabId:binding.tabId}).catch(()=>{});
   target.resources?.dispose();
   if(target.viewport)try{await command(binding.tabId,'Emulation.clearDeviceMetricsOverride');}catch{}
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
@@ -256,10 +361,16 @@ async function control(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
   if(!target)return;
+  if(method==='Page.screencastFrame'){
+    const ack=()=>command(source.tabId,'Page.screencastFrameAck',{sessionId:params.sessionId}).catch(()=>{});
+    if(!target.streaming||target.frameBusy||Date.now()-(target.lastFrame||0)<33){void ack();return;}
+    target.frameBusy=true;target.lastFrame=Date.now();
+    void offscreen({type:'frame',tabId:source.tabId,data:params.data}).catch(()=>{}).finally(()=>{target.frameBusy=false;void ack();});
+  }
   target.resources?.event(method,params);
   if(method==='DOM.shadowRootPushed'&&params.root.shadowRootType==='closed')void shadows(source.tabId).catch(()=>{});
-  if(method==='Page.javascriptDialogOpening'){target.dialog={id:crypto.randomUUID(),kind:params.type,message:params.message.slice(0,8192),default:(params.defaultPrompt||'').slice(0,8192)};for(const id of target.sessions)transmit({type:'dialog',sessionId:id,dialog:target.dialog});}
-  if(method==='Page.javascriptDialogClosed'){target.dialog=null;for(const id of target.sessions)transmit({type:'dialog',sessionId:id,dialog:null});}
+  if(method==='Page.javascriptDialogOpening'){target.dialog={id:crypto.randomUUID(),kind:params.type,message:params.message.slice(0,8192),default:(params.defaultPrompt||'').slice(0,8192)};for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:target.dialog});}
+  if(method==='Page.javascriptDialogClosed'){target.dialog=null;for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:null});}
   if (target && method === 'Page.frameNavigated' && !params.frame.parentId) {
     target.resources?.dispose();target.contextId = null; target.pending = null; target.nextSend = 0;
   }
@@ -268,8 +379,8 @@ function detached(tabId, reason) {
   const target = targets.get(tabId);
   if (!target) return;
   clearInterval(target.timer);
-  clearInterval(target.rasterTimer);
-  target.resources?.dispose();targets.delete(tabId);
+  clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
+  target.resources?.dispose();nativeTabs.delete(tabId);void offscreen({type:'stop-video',tabId}).catch(()=>{});targets.delete(tabId);
   for (const id of target.sessions) {
     const binding=bindings.get(id);
     if(reason==='target_closed'&&binding?.popups.length){const parentId=binding.popups.pop();schedule(async()=>{try{const tab=await chrome.tabs.get(parentId);await switchTab(id,tab,binding);}catch{bindings.delete(id);status(id,'closed','弹出页的来源标签页已关闭');}});continue;}
@@ -294,15 +405,28 @@ async function api(path, options = {}) {
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
+  if(message.target==='offscreen')return false;
+  if(message.target==='worker'){
+    if(message.type==='signal'){const p=peers.get(message.sessionId+':'+message.viewerId);if(p){if(message.signal?.description?.type==='offer')p.attempt=message.signal.attempt;transmit(message);}}
+    if(message.type==='peer-state')schedule(()=>peerState(message));
+    if(message.type==='peer-input')peerInput(message);
+    if(message.type==='native-ended'){nativeTabs.delete(message.tabId);const t=targets.get(message.tabId);if(t){t.streaming=false;t.nextRaster=0;}}
+    respond(true);return false;
+  }
+  let capturedNow=false;
   const run = async () => {
     if (message.type === 'share') {
+      if(message.kind==='tab'&&chrome.tabCapture&&!nativeTabs.has(message.tabId)){try{
+        const streamId=await chrome.tabCapture.getMediaStreamId({targetTabId:message.tabId});
+        if(await offscreen({type:'capture-native',tabId:message.tabId,streamId})){nativeTabs.add(message.tabId);capturedNow=true;const t=targets.get(message.tabId);if(t){if(t.streaming)await command(message.tabId,'Page.stopScreencast').catch(()=>{});t.streaming=false;t.nextRaster=0;}}
+      }catch{/* Automated/reopened tabs use the continuous CDP video source. */}}
       await connect();
       const epoch = await boot;
       const body = {agentId: config.agentId, kind: message.kind, url: targetURL(message.url), title: message.title || ''};
       if (message.kind === 'tab') { body.tabId = message.tabId; body.tabEpoch = epoch; }
       const result = await api('/api/sessions', {method: 'POST', body: JSON.stringify(body)});
       const shares = (await chrome.storage.local.get('shares')).shares || {};
-      shares[result.session.id] = {id: result.session.id, title: result.session.title || result.session.url, shareUrl: result.shareUrl, kind: result.session.kind};
+      shares[result.session.id] = {id: result.session.id, title: result.session.title || result.session.url, shareUrl: result.shareUrl, kind: result.session.kind,tabId:result.session.tabId};
       await chrome.storage.local.set({shares});
       return result;
     }
@@ -310,18 +434,20 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       await api('/api/sessions/' + encodeURIComponent(message.id), {method: 'DELETE'});
       await pause(message.id);
       const {shares = {}, sessionTabs = {}} = await chrome.storage.local.get(['shares', 'sessionTabs']);
+      const nativeTab=shares[message.id]?.tabId;
       delete shares[message.id]; delete sessionTabs[message.id];
+      if(nativeTab&&nativeTabs.has(nativeTab)&&!targets.has(nativeTab)&&!Object.values(shares).some(s=>s.tabId===nativeTab)){nativeTabs.delete(nativeTab);await offscreen({type:'stop-video',tabId:nativeTab}).catch(()=>{});}
       const {sessionModes={}}=await chrome.storage.local.get('sessionModes');delete sessionModes[message.id];await chrome.storage.local.set({sessionModes});
       await chrome.storage.local.set({shares, sessionTabs});
       return {ok: true};
     }
     if (message.type === 'reconnect') {
       if (socket) { const old = socket; socket = null; old.close(); }
-      await pauseAll(); await connect(); return {ok: true};
+      peers.clear();nativeTabs.clear();await offscreen({type:'stop'}).catch(()=>{});await pauseAll(); await connect(); return {ok: true};
     }
     throw new Error('未知操作');
   };
-  run().then(value => respond({ok: true, value}), error => respond({ok: false, error: error.message}));
+  run().then(value => respond({ok: true, value}), async error => {if(capturedNow&&!targets.has(message.tabId)){nativeTabs.delete(message.tabId);await offscreen({type:'stop-video',tabId:message.tabId}).catch(()=>{});}respond({ok:false,error:error.message});});
   return true;
 });
 chrome.alarms.create('connect', {periodInMinutes: 1});

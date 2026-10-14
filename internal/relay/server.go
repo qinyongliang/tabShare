@@ -23,7 +23,11 @@ import (
 	"github.com/qinyongliang/tabShare/web"
 )
 
-type Config struct{ DataDir, PublicURL string }
+type Config struct {
+	DataDir, PublicURL string
+	STUNURLs, TURNURLs []string
+	TURNSecret         string
+}
 type Session struct {
 	ID       string `json:"id"`
 	Key      string `json:"key"`
@@ -35,30 +39,32 @@ type Session struct {
 	Title    string `json:"title"`
 }
 type Message struct {
-	Type      string      `json:"type"`
-	ViewerID  string      `json:"viewerId,omitempty"`
-	Viewport  *Viewport   `json:"viewport,omitempty"`
-	Asset     *AssetMeta  `json:"asset,omitempty"`
-	Assets    []AssetMeta `json:"assets,omitempty"`
-	Mode      string      `json:"mode,omitempty"`
-	Dialog    *Dialog     `json:"dialog,omitempty"`
-	SessionID string      `json:"sessionId,omitempty"`
-	Token     string      `json:"token,omitempty"`
-	AgentID   string      `json:"agentId,omitempty"`
-	Key       string      `json:"key,omitempty"`
-	Session   *Session    `json:"session,omitempty"`
-	Data      string      `json:"data,omitempty"`
-	Width     float64     `json:"width,omitempty"`
-	Height    float64     `json:"height,omitempty"`
-	Status    string      `json:"status,omitempty"`
-	Detail    string      `json:"detail,omitempty"`
-	URL       string      `json:"url,omitempty"`
-	Title     string      `json:"title,omitempty"`
-	Viewers   int         `json:"viewers,omitempty"`
-	Input     *Input      `json:"input,omitempty"`
-	Document  *Document   `json:"document,omitempty"`
-	NodeID    string      `json:"nodeId,omitempty"`
-	Full      bool        `json:"full,omitempty"`
+	Type       string      `json:"type"`
+	Signal     *Signal     `json:"signal,omitempty"`
+	ICEServers []ICEServer `json:"iceServers,omitempty"`
+	ViewerID   string      `json:"viewerId,omitempty"`
+	Viewport   *Viewport   `json:"viewport,omitempty"`
+	Asset      *AssetMeta  `json:"asset,omitempty"`
+	Assets     []AssetMeta `json:"assets,omitempty"`
+	Mode       string      `json:"mode,omitempty"`
+	Dialog     *Dialog     `json:"dialog,omitempty"`
+	SessionID  string      `json:"sessionId,omitempty"`
+	Token      string      `json:"token,omitempty"`
+	AgentID    string      `json:"agentId,omitempty"`
+	Key        string      `json:"key,omitempty"`
+	Session    *Session    `json:"session,omitempty"`
+	Data       string      `json:"data,omitempty"`
+	Width      float64     `json:"width,omitempty"`
+	Height     float64     `json:"height,omitempty"`
+	Status     string      `json:"status,omitempty"`
+	Detail     string      `json:"detail,omitempty"`
+	URL        string      `json:"url,omitempty"`
+	Title      string      `json:"title,omitempty"`
+	Viewers    int         `json:"viewers,omitempty"`
+	Input      *Input      `json:"input,omitempty"`
+	Document   *Document   `json:"document,omitempty"`
+	NodeID     string      `json:"nodeId,omitempty"`
+	Full       bool        `json:"full,omitempty"`
 }
 type Input struct {
 	Action            string     `json:"action"`
@@ -110,6 +116,7 @@ type Dialog struct {
 }
 type peer struct {
 	id     string
+	direct bool
 	conn   *websocket.Conn
 	queue  chan Message
 	cancel context.CancelFunc
@@ -151,6 +158,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("public-url must be an HTTP(S) origin")
 	}
 	cfg.PublicURL = strings.TrimRight(cfg.PublicURL, "/")
+	if err = validateICE(cfg); err != nil {
+		return nil, err
+	}
 	if err = os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, err
 	}
@@ -367,7 +377,7 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request, agent bool) (*we
 		if agent {
 			c.SetReadLimit(4 << 20)
 		} else {
-			c.SetReadLimit(16384)
+			c.SetReadLimit(131072)
 		}
 	}
 	return c, err
@@ -417,6 +427,9 @@ func send(p *peer, m Message) {
 }
 func (s *Server) broadcast(id string, m Message) {
 	for p := range s.live[id].viewers {
+		if p.direct && (m.Type == "dom" || m.Type == "raster" || m.Type == "resource" || m.Type == "resources") {
+			continue
+		}
 		send(p, m)
 	}
 }
@@ -445,6 +458,10 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 	for sid, session := range s.sessions {
 		if session.AgentID == id && len(s.live[sid].viewers) > 0 {
 			send(p, Message{Type: "open", Session: safeSession(session)})
+			for viewer := range s.live[sid].viewers {
+				viewer.direct = false
+				send(p, Message{Type: "peer", SessionID: sid, ViewerID: viewer.id, ICEServers: s.iceServers(viewer.id)})
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -486,6 +503,22 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch m.Type {
+		case "signal":
+			if validSignal(m.Signal) {
+				for viewer := range s.live[se.ID].viewers {
+					if viewer.id == m.ViewerID {
+						send(viewer, Message{Type: "signal", Signal: m.Signal})
+						break
+					}
+				}
+			}
+		case "transport":
+			for viewer := range s.live[se.ID].viewers {
+				if viewer.id == m.ViewerID {
+					viewer.direct = m.Status == "p2p"
+					break
+				}
+			}
 		case "raster":
 			if m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
 				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Full: m.Full})
@@ -556,7 +589,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	p := newPeer(c, r)
 	defer p.cancel()
 	l.viewers[p] = true
-	send(p, Message{Type: "joined", ViewerID: p.id})
+	send(p, Message{Type: "joined", ViewerID: p.id, ICEServers: s.iceServers(p.id)})
 	send(p, Message{Type: "viewport", Viewport: l.viewport})
 	s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 	send(p, Message{Type: "status", Status: l.status, URL: se.URL, Title: se.Title})
@@ -574,6 +607,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	}
 	if agent := s.agents[se.AgentID]; agent != nil {
 		send(agent, Message{Type: "open", Session: safeSession(se)})
+		send(agent, Message{Type: "peer", SessionID: id, ViewerID: p.id, ICEServers: s.iceServers(p.id)})
 	} else {
 		send(p, Message{Type: "status", Status: "offline", Detail: "等待共享浏览器连接"})
 	}
@@ -582,6 +616,9 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(l.viewers, p)
+		if a := s.agents[se.AgentID]; a != nil {
+			send(a, Message{Type: "peer-left", SessionID: id, ViewerID: p.id})
+		}
 		if l.viewport != nil && l.viewport.Owner == p.id {
 			l.viewport = nil
 			s.broadcast(id, Message{Type: "viewport"})
@@ -619,6 +656,22 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		if tokens < 0 {
 			_ = c.Close(websocket.StatusPolicyViolation, "too many commands")
 			return
+		}
+		if m.Type == "signal" && validSignal(m.Signal) {
+			s.mu.Lock()
+			if a := s.agents[se.AgentID]; a != nil {
+				send(a, Message{Type: "signal", SessionID: id, ViewerID: p.id, Signal: m.Signal})
+			}
+			s.mu.Unlock()
+			continue
+		}
+		if m.Type == "resync" {
+			s.mu.Lock()
+			if a := s.agents[se.AgentID]; a != nil {
+				send(a, Message{Type: "resync", SessionID: id})
+			}
+			s.mu.Unlock()
+			continue
 		}
 		if m.Type != "retry" && (m.Type != "input" || !validInput(m.Input)) {
 			continue
