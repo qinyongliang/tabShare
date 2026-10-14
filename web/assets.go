@@ -18,7 +18,7 @@ func Serve(w http.ResponseWriter, r *http.Request) {
 		name = "viewer.html"
 	}
 	switch name {
-	case "index.html", "viewer.html", "viewer.js", "style.css", "mirror.js", "mirror.html":
+	case "index.html", "viewer.html", "viewer.js", "style.css", "mirror.js", "mirror.html", "resources.js":
 	default:
 		http.NotFound(w, r)
 		return
@@ -38,7 +38,7 @@ func Serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}
 	if name == "mirror.html" {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; sandbox allow-same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; sandbox allow-same-origin")
 	}
 	_, _ = w.Write(b)
 }

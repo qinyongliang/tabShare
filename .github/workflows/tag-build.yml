@@ -32,6 +32,10 @@ jobs:
       - run: go vet ./...
       - run: npm ci --ignore-scripts
       - run: npm test
+      - name: Real browser integration
+        run: |
+          browser_path=$(command -v google-chrome)
+          CHROMIUM_PATH="$browser_path" npm run test:e2e
 
   server:
     name: Server / ${{ matrix.goos }} / ${{ matrix.goarch }}

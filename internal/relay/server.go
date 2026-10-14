@@ -34,43 +34,66 @@ type Session struct {
 	Title    string `json:"title"`
 }
 type Message struct {
-	Type      string    `json:"type"`
-	SessionID string    `json:"sessionId,omitempty"`
-	Token     string    `json:"token,omitempty"`
-	AgentID   string    `json:"agentId,omitempty"`
-	Key       string    `json:"key,omitempty"`
-	Session   *Session  `json:"session,omitempty"`
-	Data      string    `json:"data,omitempty"`
-	Width     float64   `json:"width,omitempty"`
-	Height    float64   `json:"height,omitempty"`
-	Status    string    `json:"status,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	URL       string    `json:"url,omitempty"`
-	Title     string    `json:"title,omitempty"`
-	Viewers   int       `json:"viewers,omitempty"`
-	Input     *Input    `json:"input,omitempty"`
-	Document  *Document `json:"document,omitempty"`
-	NodeID    string    `json:"nodeId,omitempty"`
-	Full      bool      `json:"full,omitempty"`
+	Type      string      `json:"type"`
+	Asset     *AssetMeta  `json:"asset,omitempty"`
+	Assets    []AssetMeta `json:"assets,omitempty"`
+	Mode      string      `json:"mode,omitempty"`
+	Dialog    *Dialog     `json:"dialog,omitempty"`
+	SessionID string      `json:"sessionId,omitempty"`
+	Token     string      `json:"token,omitempty"`
+	AgentID   string      `json:"agentId,omitempty"`
+	Key       string      `json:"key,omitempty"`
+	Session   *Session    `json:"session,omitempty"`
+	Data      string      `json:"data,omitempty"`
+	Width     float64     `json:"width,omitempty"`
+	Height    float64     `json:"height,omitempty"`
+	Status    string      `json:"status,omitempty"`
+	Detail    string      `json:"detail,omitempty"`
+	URL       string      `json:"url,omitempty"`
+	Title     string      `json:"title,omitempty"`
+	Viewers   int         `json:"viewers,omitempty"`
+	Input     *Input      `json:"input,omitempty"`
+	Document  *Document   `json:"document,omitempty"`
+	NodeID    string      `json:"nodeId,omitempty"`
+	Full      bool        `json:"full,omitempty"`
 }
 type Input struct {
-	Action     string  `json:"action"`
-	X          float64 `json:"x,omitempty"`
-	Y          float64 `json:"y,omitempty"`
-	Button     string  `json:"button,omitempty"`
-	Buttons    int     `json:"buttons,omitempty"`
-	ClickCount int     `json:"clickCount,omitempty"`
-	DeltaX     float64 `json:"deltaX,omitempty"`
-	DeltaY     float64 `json:"deltaY,omitempty"`
-	Key        string  `json:"key,omitempty"`
-	Code       string  `json:"code,omitempty"`
-	KeyCode    int     `json:"keyCode,omitempty"`
-	Modifiers  int     `json:"modifiers,omitempty"`
-	Text       string  `json:"text,omitempty"`
-	URL        string  `json:"url,omitempty"`
-	NodeID     string  `json:"nodeId,omitempty"`
-	ScrollTop  float64 `json:"scrollTop,omitempty"`
-	ScrollLeft float64 `json:"scrollLeft,omitempty"`
+	Action     string     `json:"action"`
+	Mode       string     `json:"mode,omitempty"`
+	DialogID   string     `json:"dialogId,omitempty"`
+	Accept     bool       `json:"accept,omitempty"`
+	Selection  *Selection `json:"selection,omitempty"`
+	Values     []string   `json:"values,omitempty"`
+	X          float64    `json:"x,omitempty"`
+	Y          float64    `json:"y,omitempty"`
+	Button     string     `json:"button,omitempty"`
+	Buttons    int        `json:"buttons,omitempty"`
+	ClickCount int        `json:"clickCount,omitempty"`
+	DeltaX     float64    `json:"deltaX,omitempty"`
+	DeltaY     float64    `json:"deltaY,omitempty"`
+	Key        string     `json:"key,omitempty"`
+	Code       string     `json:"code,omitempty"`
+	KeyCode    int        `json:"keyCode,omitempty"`
+	Modifiers  int        `json:"modifiers,omitempty"`
+	Text       string     `json:"text,omitempty"`
+	URL        string     `json:"url,omitempty"`
+	NodeID     string     `json:"nodeId,omitempty"`
+	ScrollTop  float64    `json:"scrollTop,omitempty"`
+	ScrollLeft float64    `json:"scrollLeft,omitempty"`
+}
+type Selection struct {
+	Anchor       string `json:"anchor"`
+	Focus        string `json:"focus"`
+	AnchorOffset int    `json:"anchorOffset"`
+	FocusOffset  int    `json:"focusOffset"`
+	Start        int    `json:"start"`
+	End          int    `json:"end"`
+}
+type Dialog struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	Default string `json:"default,omitempty"`
 }
 type peer struct {
 	conn   *websocket.Conn
@@ -78,17 +101,24 @@ type peer struct {
 	cancel context.CancelFunc
 }
 type live struct {
-	viewers  map[*peer]bool
-	document documentState
-	status   string
+	viewers       map[*peer]bool
+	document      documentState
+	status        string
+	resources     map[string]*assetEntry
+	resourceBytes int
+	full          bool
+	mode          string
+	dialog        *Dialog
 }
 type Server struct {
-	mu       sync.Mutex
-	cfg      Config
-	token    string
-	sessions map[string]*Session
-	agents   map[string]*peer
-	live     map[string]*live
+	mu         sync.Mutex
+	cfg        Config
+	token      string
+	sessions   map[string]*Session
+	agents     map[string]*peer
+	live       map[string]*live
+	assets     map[string]*assetBlob
+	assetBytes int
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,80}$`)
@@ -128,7 +158,7 @@ func New(cfg Config) (*Server, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, token: strings.TrimSpace(string(b)), sessions: map[string]*Session{}, agents: map[string]*peer{}, live: map[string]*live{}}
+	s := &Server{assets: map[string]*assetBlob{}, cfg: cfg, token: strings.TrimSpace(string(b)), sessions: map[string]*Session{}, agents: map[string]*peer{}, live: map[string]*live{}}
 	if len(s.token) < 32 {
 		return nil, errors.New("pairing token is too short")
 	}
@@ -165,6 +195,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/sessions", s.api)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.remove)
 	mux.HandleFunc("OPTIONS /api/sessions/{id}", s.api)
+	mux.HandleFunc("/api/resources/{id}/{asset}", s.resource)
 	mux.HandleFunc("GET /ws/agent", s.agentWS)
 	mux.HandleFunc("GET /ws/view/{id}", s.viewerWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -298,6 +329,7 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 		p.cancel()
 		_ = p.conn.CloseNow()
 	}
+	s.clearAssets(s.live[id])
 	// Keep the live object until existing viewer cleanup has finished.
 	w.WriteHeader(204)
 }
@@ -410,6 +442,8 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 		delete(s.agents, id)
 		for sid, se := range s.sessions {
 			if se.AgentID == id {
+				s.clearAssets(s.live[sid])
+				s.live[sid].dialog = nil
 				s.live[sid].document = documentState{}
 				s.live[sid].status = "offline"
 				s.broadcast(sid, Message{Type: "status", Status: "offline", Detail: "共享浏览器已断开，正在等待自动重连"})
@@ -440,12 +474,24 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Full: m.Full})
 			}
 		case "mode":
-			s.broadcast(se.ID, Message{Type: "mode", Full: m.Full})
+			if m.Mode == "dom" || m.Mode == "raster" {
+				s.live[se.ID].mode = m.Mode
+			}
+			s.live[se.ID].full = m.Full
+			s.broadcast(se.ID, Message{Type: "mode", Full: m.Full, Mode: s.live[se.ID].mode})
+		case "dialog":
+			if m.Dialog == nil || (identifier.MatchString(m.Dialog.ID) && len(m.Dialog.Message) <= 8192 && len(m.Dialog.Default) <= 8192) {
+				s.live[se.ID].dialog = m.Dialog
+				s.broadcast(se.ID, Message{Type: "dialog", Dialog: m.Dialog})
+			}
 		case "dom":
 			if len(s.live[se.ID].viewers) == 0 {
 				break
 			}
 			if err := s.live[se.ID].document.apply(m.Document); err == nil {
+				if m.Document.Reset {
+					s.pruneAssets(s.live[se.ID], m.Document.Version)
+				}
 				out := Message{Type: "dom", Document: m.Document}
 				s.live[se.ID].status = "connected"
 				s.broadcast(se.ID, out)
@@ -490,6 +536,15 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	l.viewers[p] = true
 	s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 	send(p, Message{Type: "status", Status: l.status, URL: se.URL, Title: se.Title})
+	assets := make([]AssetMeta, 0, len(l.resources))
+	for _, a := range l.resources {
+		assets = append(assets, a.AssetMeta)
+	}
+	send(p, Message{Type: "resources", Assets: assets})
+	send(p, Message{Type: "mode", Full: l.full, Mode: l.mode})
+	if l.dialog != nil {
+		send(p, Message{Type: "dialog", Dialog: l.dialog})
+	}
 	if doc := l.document.snapshot(); doc != nil {
 		send(p, Message{Type: "dom", Document: doc})
 	}
@@ -506,6 +561,8 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 		if len(l.viewers) == 0 {
 			l.document = documentState{}
+			s.clearAssets(l)
+			l.dialog = nil
 			if a := s.agents[se.AgentID]; a != nil {
 				send(a, Message{Type: "pause", SessionID: id})
 			}
@@ -550,6 +607,12 @@ func validInput(i *Input) bool {
 	if i == nil || i.Modifiers < 0 || i.Modifiers > 15 || len(i.Text) > 8192 || len(i.Key) > 64 || len(i.Code) > 64 || len(i.NodeID) > 32 {
 		return false
 	}
+	if i.Selection != nil {
+		v := i.Selection
+		if len(v.Anchor) > 32 || len(v.Focus) > 32 || v.AnchorOffset < 0 || v.FocusOffset < 0 || v.Start < 0 || v.End < 0 || v.AnchorOffset > 100000 || v.FocusOffset > 100000 || v.Start > 100000 || v.End > 100000 {
+			return false
+		}
+	}
 	switch i.Action {
 	case "mouseMoved", "mousePressed", "mouseReleased", "mouseWheel":
 		if i.Button != "" && i.Button != "none" && i.Button != "left" && i.Button != "right" && i.Button != "middle" {
@@ -563,7 +626,22 @@ func validInput(i *Input) bool {
 	case "scroll":
 		return i.NodeID != "" && i.ScrollTop >= 0 && i.ScrollTop <= 10000000 && i.ScrollLeft >= 0 && i.ScrollLeft <= 10000000
 	case "select":
-		return i.NodeID != ""
+		if len(i.Values) > 128 {
+			return false
+		}
+		n := 0
+		for _, v := range i.Values {
+			n += len(v)
+		}
+		return i.NodeID != "" && n <= 8192
+	case "mode":
+		return i.Mode == "dom" || i.Mode == "raster"
+	case "selection":
+		return i.NodeID != "" && i.Selection != nil
+	case "dialog":
+		return identifier.MatchString(i.DialogID)
+	case "closePopup":
+		return true
 	case "navigate":
 		_, err := canonical(i.URL)
 		return err == nil && len(i.URL) <= 8192
@@ -580,6 +658,7 @@ func (s *Server) Close() {
 		_ = p.conn.CloseNow()
 	}
 	for _, l := range s.live {
+		s.clearAssets(l)
 		for p := range l.viewers {
 			p.cancel()
 			_ = p.conn.CloseNow()

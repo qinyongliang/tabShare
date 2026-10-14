@@ -1,5 +1,6 @@
 import {serverOrigin, targetURL, resolveTab, cdpInput} from './controller.js';
 import {installDOM, captureDOM} from './dom-capture.js';
+import {ResourceBridge} from './resources.js';
 
 let config, socket, connecting, retryTimer;
 const bindings = new Map();
@@ -49,7 +50,8 @@ async function connect() {
         if (message.type === 'resync') schedule(() => resync(message.sessionId));
         if (message.type === 'input') {
           // Commands from all viewers execute in the same order on this browser.
-          schedule(() => control(message).catch(error => status(message.sessionId, 'error', error.message)));
+          const run=()=>control(message).catch(error=>status(message.sessionId,'error',error.message));
+          if(message.input?.action==='dialog')void run();else schedule(run);
         }
       };
       ws.onclose = () => {
@@ -76,6 +78,10 @@ async function world(tabId) {
   target.contextId = result.executionContextId;
   await evaluate(tabId, installDOM);
   await evaluate(tabId, 'globalThis.__tabShareDOM.reset()');
+  await evaluate(tabId, 'globalThis.__tabShareDOM.setMode('+JSON.stringify(target.mode||'dom')+')');
+  target.resources=new ResourceBridge((method,params)=>command(tabId,method,params),expression=>evaluate(tabId,expression));
+  await target.resources.scan().catch(()=>{});
+  await shadows(tabId).catch(()=>{});
   return target.contextId;
 }
 async function evaluate(tabId, expression) {
@@ -84,14 +90,36 @@ async function evaluate(tabId, expression) {
   if (result.exceptionDetails) throw new Error(result.result?.description || result.exceptionDetails.text);
   return result.result.value;
 }
+async function shadows(tabId) {
+  const target=targets.get(tabId);if(!target?.contextId||target.shadowBusy)return;
+  target.shadowBusy=true;
+  try{
+    const {root}=await command(tabId,'DOM.getDocument',{depth:-1,pierce:true});
+    const closed=[];const walk=node=>{if(node.shadowRootType==='closed')closed.push(node);for(const c of [...node.children||[],...node.shadowRoots||[]])walk(c);};walk(root);
+    for(const node of closed){
+      const {object}=await command(tabId,'DOM.resolveNode',{backendNodeId:node.backendNodeId,executionContextId:target.contextId});
+      if(!object.objectId)continue;
+      try{await command(tabId,'Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:'function(){globalThis.__tabShareDOM?.registerShadow(this.host,this)}',returnByValue:true});}finally{await command(tabId,'Runtime.releaseObject',{objectId:object.objectId}).catch(()=>{});}
+    }
+  }finally{target.shadowBusy=false;}
+}
+async function rememberMode(target,mode) {
+  target.mode=mode;const {sessionModes={}}=await chrome.storage.local.get('sessionModes');
+  for(const id of target.sessions)sessionModes[id]=mode;await chrome.storage.local.set({sessionModes});
+  for(const id of target.sessions)transmit({type:'mode',sessionId:id,mode,full:mode==='raster'?true:!!target.full});
+  target.nextRaster=0;
+}
 async function snapshot(tabId) {
   const target = targets.get(tabId);
   if (!target || target.capturing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
   target.capturing = true;
   try {
     await world(tabId);
-    const delta = target.pending || await evaluate(tabId, captureDOM);
+    const delta = target.pending || await evaluate(tabId, target.mode==='raster'? 'globalThis.__tabShareDOM.capture(true)':captureDOM);
     if (!delta) return;
+    if(delta.meta?.mode!==target.mode)await rememberMode(target,delta.meta.mode);
+    const requests=delta.resources;delete delta.resources;
+    if(requests?.length)void target.resources.transfer(requests,target.sessions,{server:serverOrigin(config.server),pairingToken:config.pairingToken});
     let sent = true;
     for (const id of target.sessions) sent = transmit({type:'dom', sessionId:id, document:delta}) && sent;
     if (!sent) { target.pending = delta; return; }
@@ -111,7 +139,7 @@ async function raster(tabId) {
   try{
     await world(tabId);
     const info=await evaluate(tabId,'globalThis.__tabShareDOM.fallback()');
-    if(target.full!==info.full){target.full=info.full;for(const id of target.sessions)transmit({type:'mode',sessionId:id,full:info.full});}
+    if(target.full!==info.full){target.full=info.full;for(const id of target.sessions)transmit({type:'mode',sessionId:id,full:info.full,mode:target.mode});}
     let bytes=0;
     const regions=info.full?[{id:'',width:info.width,height:info.height}]:info.regions;
     for(const region of regions){
@@ -134,29 +162,39 @@ async function resync(sessionId) {
   target.pending = null; target.nextSend = 0;
   await snapshot(binding.tabId);
 }
+async function targetFor(tab,mode='dom') {
+  let target=targets.get(tab.id);if(target)return target;
+  await chrome.debugger.attach({tabId:tab.id},'1.3');
+  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode};targets.set(tab.id,target);
+  try{await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});}
+  catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
+  target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);return target;
+}
+async function switchTab(id,tab,binding) {
+  const mode=targets.get(binding.tabId)?.mode||(await chrome.storage.local.get('sessionModes')).sessionModes?.[id]||'dom';
+  await pause(id);
+  const target=await targetFor(tab,mode);target.sessions.add(id);bindings.set(id,{...binding,tabId:tab.id});
+  if(target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;}
+  status(id,'connected','',tab);await snapshot(tab.id);
+}
 async function openSession(session) {
   if (opening.has(session.id)) return opening.get(session.id);
   const job = (async () => {
     try {
+      if(bindings.has(session.id)&&targets.has(bindings.get(session.id).tabId))return;
       const epoch = await boot;
-      const stored = await chrome.storage.local.get('sessionTabs');
+      const stored = await chrome.storage.local.get(['sessionTabs','sessionModes']);
       const tab = await resolveTab(chrome.tabs, session, stored.sessionTabs?.[session.id], epoch);
       if (bindings.has(session.id) && bindings.get(session.id).tabId !== tab.id) await pause(session.id);
-      let target = targets.get(tab.id);
-      if (!target) {
-        await chrome.debugger.attach({tabId: tab.id}, '1.3');
-        target = {sessions: new Set(), contextId: null, capturing: false, nextSend: 0, nextRaster:0, full:false};
-        targets.set(tab.id, target);
-        await command(tab.id, 'Page.enable');
-        target.timer = setInterval(() => void snapshot(tab.id), 200);
-        target.rasterTimer = setInterval(() => void raster(tab.id), 500);
-      }
+      const target=await targetFor(tab,stored.sessionModes?.[session.id]||'dom');
+      const alreadyRunning=target.sessions.size>0;
       target.sessions.add(session.id);
-      bindings.set(session.id, {tabId: tab.id, session});
+      bindings.set(session.id, {tabId: tab.id,rootTabId:tab.id,popups:[], session});
       const sessionTabs = stored.sessionTabs || {};
       sessionTabs[session.id] = {tabId: tab.id, epoch};
       await chrome.storage.local.set({sessionTabs});
       status(session.id, 'connected', '', tab);
+      if(alreadyRunning&&target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;const requests=[...target.resources.done].filter(([,item])=>item.bytes).map(([id])=>({id}));void target.resources.transfer(requests,target.sessions,{server:serverOrigin(config.server),pairingToken:config.pairingToken});}
       await snapshot(tab.id);
     } catch (error) { status(session.id, 'error', error.message); }
   })().finally(() => opening.delete(session.id));
@@ -173,6 +211,7 @@ async function pause(sessionId) {
   if (target.sessions.size) return;
   clearInterval(target.timer);
   clearInterval(target.rasterTimer);
+  target.resources?.dispose();
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
   targets.delete(binding.tabId);
   try { await chrome.debugger.detach({tabId: binding.tabId}); } catch { /* Already closed/detached. */ }
@@ -183,10 +222,15 @@ async function control(message) {
   if (!binding) return;
   let input = message.input;
   const {action} = input;
+  const target=targets.get(binding.tabId);
+  if(action==='closePopup'){if(binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
+  if(action==='dialog'){if(target?.dialog?.id!==input.dialogId)return;await command(binding.tabId,'Page.handleJavaScriptDialog',{accept:!!input.accept,promptText:input.text||''});return;}
+  if(action==='mode'){await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
   if (input.nodeId) {
     await world(binding.tabId);
     const point = await evaluate(binding.tabId, 'globalThis.__tabShareDOM.act(' + JSON.stringify(input) + ')');
-    if (action === 'scroll' || action === 'select') return;
+    if(action==='select'){if(point?.key){for(const key of [point,{key:'Enter',code:'Enter',keyCode:13}])for(const action of ['keyDown','keyUp']){const [method,params]=cdpInput({action,...key});await command(binding.tabId,method,params);}await evaluate(binding.tabId,'globalThis.__tabShareDOM.act('+JSON.stringify({...input,action:'selectFinish'})+')');}return;}
+    if (action === 'scroll' || action === 'selection') return;
     input = {...input, ...point};
   }
   if (action === 'back' || action === 'forward') {
@@ -197,8 +241,13 @@ async function control(message) {
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
+  if(!target)return;
+  target.resources?.event(method,params);
+  if(method==='DOM.shadowRootPushed'&&params.root.shadowRootType==='closed')void shadows(source.tabId).catch(()=>{});
+  if(method==='Page.javascriptDialogOpening'){target.dialog={id:crypto.randomUUID(),kind:params.type,message:params.message.slice(0,8192),default:(params.defaultPrompt||'').slice(0,8192)};for(const id of target.sessions)transmit({type:'dialog',sessionId:id,dialog:target.dialog});}
+  if(method==='Page.javascriptDialogClosed'){target.dialog=null;for(const id of target.sessions)transmit({type:'dialog',sessionId:id,dialog:null});}
   if (target && method === 'Page.frameNavigated' && !params.frame.parentId) {
-    target.contextId = null; target.pending = null; target.nextSend = 0;
+    target.resources?.dispose();target.contextId = null; target.pending = null; target.nextSend = 0;
   }
 });
 function detached(tabId, reason) {
@@ -206,14 +255,17 @@ function detached(tabId, reason) {
   if (!target) return;
   clearInterval(target.timer);
   clearInterval(target.rasterTimer);
-  targets.delete(tabId);
+  target.resources?.dispose();targets.delete(tabId);
   for (const id of target.sessions) {
+    const binding=bindings.get(id);
+    if(reason==='target_closed'&&binding?.popups.length){const parentId=binding.popups.pop();schedule(async()=>{try{const tab=await chrome.tabs.get(parentId);await switchTab(id,tab,binding);}catch{bindings.delete(id);status(id,'closed','弹出页的来源标签页已关闭');}});continue;}
     bindings.delete(id);
     status(id, 'closed', reason === 'target_closed' ? '原标签页已关闭；网址共享可以点击重新连接来打开新标签页' : '浏览器已停止调试；可关闭分享页面以结束访问');
   }
 }
 chrome.debugger.onDetach.addListener((source, reason) => detached(source.tabId, reason));
-chrome.tabs.onRemoved.addListener(tabId => detached(tabId, 'target_closed'));
+chrome.tabs.onRemoved.addListener(tabId => {detached(tabId,'target_closed');for(const [id,binding] of bindings)if(binding.rootTabId===tabId&&binding.tabId!==tabId)schedule(async()=>{await pause(id);status(id,'closed','原共享标签页已关闭');});});
+chrome.tabs.onCreated.addListener(tab=>{if(!tab.openerTabId)return;for(const [id,binding] of bindings)if(binding.tabId===tab.openerTabId&&binding.popups.length<4)schedule(async()=>{if(bindings.get(id)!==binding)return;try{status(id,'connecting','正在连接共享网页打开的弹出页');const fresh=await chrome.tabs.get(tab.id);await switchTab(id,fresh,{...binding,popups:[...binding.popups,binding.tabId]});}catch(error){status(id,'error',error.message);}});});
 chrome.tabs.onUpdated.addListener((tabId, changes, tab) => {
   const target = targets.get(tabId);
   if (target && (changes.url || changes.title)) for (const id of target.sessions) status(id, 'connected', '', tab);
@@ -245,6 +297,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       await pause(message.id);
       const {shares = {}, sessionTabs = {}} = await chrome.storage.local.get(['shares', 'sessionTabs']);
       delete shares[message.id]; delete sessionTabs[message.id];
+      const {sessionModes={}}=await chrome.storage.local.get('sessionModes');delete sessionModes[message.id];await chrome.storage.local.set({sessionModes});
       await chrome.storage.local.set({shares, sessionTabs});
       return {ok: true};
     }

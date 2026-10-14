@@ -145,7 +145,7 @@ func (state *documentState) apply(d *Document) error {
 	state.sequence = d.Sequence
 	state.root = d.Root
 	state.meta = d.Meta
-	if d.Reset {
+	if d.Reset || d.CSS != "" {
 		state.css = d.CSS
 	}
 	return nil
