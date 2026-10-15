@@ -39,14 +39,28 @@ test('navigation discards an initializing world and the next attempt creates a f
  assert.ok(w.calls.filter(c=>c.method==='Runtime.evaluate').every(c=>c.params.contextId===42),'old world must not execute after navigation');
 });
 
-test('capture timeout switches to lightweight video metadata without rebuilding the world',async()=>{
+test('capture timeout retries bounded DOM without switching the page to video',async()=>{
  const delta={version:'live',sequence:1,reset:true,root:'1',nodes:[{id:'1',tag:'body',children:[]}],meta:{mode:'dom',truncated:true,width:1280,height:720}};
- const w=await worker(async(method,p)=>{
-  if(method==='Runtime.evaluate'&&p.expression===captureDOM)throw Error('Runtime.evaluate: Execution was terminated');
-  if(method==='Runtime.evaluate'&&p.expression==='globalThis.__tabShareDOM.capture(true)')return {result:{value:delta}};
+ let calls=0;const w=await worker(async(method,p)=>{
+  if(method==='Runtime.evaluate'&&p.expression===captureDOM){if(++calls===1)throw Error('Runtime.evaluate: Execution was terminated');return {result:{value:delta}};}
   return normal(method,p);
  });
  await w.run('snapshot(7)');assert.equal(w.target.captureLimited,true);assert.equal(w.target.contextId,42);
  await w.run('snapshot(7)');assert.equal(w.target.document.nodes.size,1);assert.equal(w.writes.at(-1).type,'dom');
  assert.equal(w.calls.filter(c=>c.method==='Page.createIsolatedWorld').length,1);
+});
+
+test('foreground screencast updates stop the old capture before applying a new frame interval',async()=>{
+ const w=await worker(normal);w.target.streaming=true;w.target.videoFPS=2;
+ await w.run('configureScreencast(7)');w.target.videoFPS=30;await w.run('configureScreencast(7)');
+ const commands=w.calls.filter(c=>c.method==='Page.startScreencast'||c.method==='Page.stopScreencast');
+ assert.deepEqual(commands.map(c=>c.method),['Page.stopScreencast','Page.startScreencast','Page.stopScreencast','Page.startScreencast']);
+ assert.equal(commands[1].params.everyNthFrame,15);assert.equal(commands[3].params.everyNthFrame,1);
+});
+
+test('destroyed execution contexts recover without publishing the raw CDP error',async()=>{
+ let captures=0;const delta={version:'new',sequence:1,reset:true,root:'1',nodes:[{id:'1',tag:'body',children:[]}],meta:{mode:'dom',width:100,height:100}};
+ const w=await worker(async(method,p)=>{if(method==='Runtime.evaluate'&&p.expression===captureDOM){if(++captures===1)throw Error('{"code":-32000,"message":"Cannot find context with specified id"}');return {result:{value:delta}};}return normal(method,p);});
+ await w.run('snapshot(7)');assert.equal(w.target.contextId,null);assert.ok(!w.writes.some(m=>m.type==='status'&&m.status==='error'));
+ await w.run('snapshot(7)');assert.equal(w.target.document.version,'new');assert.equal(w.target.documentReady,true);
 });

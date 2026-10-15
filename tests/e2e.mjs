@@ -23,7 +23,7 @@ let turnPort;const useTURN=rtcEnabled&&(process.env.TEST_TURN==='1'||realSites);
 let assetOrigin;const assetHits=[];
 const timers=new Set();
 let serverLog = '', sourceLog = '';
-let resourceUploads=0,relayDocuments=0,relayInputs=0;
+let resourceUploads=0,clipboardUploads=0,relayDocuments=0,relayInputs=0;
 const originalFetch=globalThis.fetch;globalThis.fetch=(url,options)=>{if(String(url).includes('/api/resources/')&&options?.method==='POST')resourceUploads++;return originalFetch(url,options);};
 const state = {clicks: 0, text: '', loads: 0, path: '', cookie: '', scroll: 0, choice:'a', checked:false, canvasClicks:0};
 async function until(check, label, timeout = 15000) {
@@ -91,7 +91,7 @@ try {
       state.loads++; state.path = req.url; state.cookie = req.headers.cookie || '';
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Set-Cookie', 'shared-login=present; SameSite=Lax; Path=/');
-      res.end(`<!doctype html><html><head><title>Shared test tab</title><style>body{margin:0;height:2500px;background:#eaf1fb;font:20px sans-serif}button{position:absolute;left:40px;top:60px;width:160px;height:40px}input{position:absolute;left:40px;top:130px;width:300px;height:40px}#check{left:390px;width:25px}#choice{position:absolute;left:450px;top:130px}#anim{position:absolute;left:40px;top:280px;animation:pulse 1s linear infinite}#canvas{position:absolute;left:40px;top:360px;display:none}@keyframes pulse{from{opacity:.4}to{opacity:1}}#responsive{position:absolute;left:20px;top:500px;width:400px;background:rgb(240,240,240)}@media(max-width:600px){#click{left:20px;width:130px}#responsive{width:calc(100% - 40px);background:rgb(210,240,220)}}h1{position:absolute;left:40px;top:200px}</style></head><body><button id="click">Increment</button><input id="text"><input id="check" type="checkbox"><select id="choice"><option value="a">A</option><option value="b">B</option></select><div id="anim">Local CSS animation</div><canvas id="canvas" width="200" height="90"></canvas><div id="responsive">Responsive layout</div><h1>Shared real tab ${req.url}</h1><script>const post=data=>fetch('/event',{method:'POST',body:JSON.stringify(data)});let clicks=${state.clicks};document.querySelector('#click').onclick=()=>post({clicks:++clicks});document.querySelector('#text').oninput=e=>post({text:e.target.value});document.querySelector('#check').onchange=e=>post({checked:e.target.checked});document.querySelector('#choice').onchange=e=>post({choice:e.target.value,choiceTrusted:e.isTrusted});document.querySelector('#canvas').onclick=()=>post({canvasClicks:1});addEventListener('scroll',()=>post({scroll:scrollY}));</script></body></html>`); return;
+      res.end(`<!doctype html><html><head><title>Shared test tab</title><style>body{margin:0;height:2500px;background:#eaf1fb;font:20px sans-serif}button{position:absolute;left:40px;top:60px;width:160px;height:40px}input{position:absolute;left:40px;top:130px;width:300px;height:40px}#check{left:390px;width:25px}#choice{position:absolute;left:450px;top:130px}#anim{position:absolute;left:40px;top:280px;animation:pulse 1s linear infinite}#canvas{position:absolute;left:40px;top:360px;display:none}@keyframes pulse{from{opacity:.4}to{opacity:1}}#responsive{position:absolute;left:20px;top:500px;width:400px;background:rgb(240,240,240)}@media(max-width:600px){#click{left:20px;width:130px}#responsive{width:calc(100% - 40px);background:rgb(210,240,220)}}h1{position:absolute;left:40px;top:200px}</style></head><body><button id="click">Increment</button><input id="text"><input id="check" type="checkbox"><select id="choice"><option value="a">A</option><option value="b">B</option></select><div id="anim">Local CSS animation</div><canvas id="canvas" width="200" height="90"></canvas><div id="responsive">Responsive layout</div><div id="image-paste" contenteditable style="position:absolute;left:40px;top:650px;width:400px;min-height:30px;border:1px solid">Paste image here</div><div id="context-zone" style="position:absolute;left:600px;top:60px;width:200px;height:40px">Custom context menu</div><h1>Shared real tab ${req.url}</h1><script>const post=data=>fetch('/event',{method:'POST',body:JSON.stringify(data)});let imagePastes=0;document.querySelector('#image-paste').onpaste=e=>{const file=e.clipboardData.files[0];if(file){e.preventDefault();post({imageMime:file.type,imageBytes:file.size,imageTrusted:e.isTrusted,imagePastes:++imagePastes});}};document.querySelector('#context-zone').oncontextmenu=e=>{e.preventDefault();const menu=document.createElement('button');menu.id='context-action';menu.textContent='Context action';menu.style.cssText='position:absolute;left:'+e.pageX+'px;top:'+e.pageY+'px;z-index:500';menu.onclick=()=>{post({contextClicked:true});menu.remove();};document.body.append(menu);};let clicks=${state.clicks};document.querySelector('#click').onclick=()=>post({clicks:++clicks});document.querySelector('#text').oninput=e=>post({text:e.target.value});document.querySelector('#check').onchange=e=>post({checked:e.target.checked});document.querySelector('#choice').onchange=e=>post({choice:e.target.value,choiceTrusted:e.isTrusted});document.querySelector('#canvas').onclick=()=>post({canvasClicks:1});addEventListener('scroll',()=>post({scroll:scrollY}));</script></body></html>`); return;
     }
     res.writeHead(404); res.end();
   });
@@ -185,13 +185,21 @@ try {
   visitors = await chromium.launch({executablePath: browserPath, headless: true, args: ['--no-sandbox']});
   const context = await visitors.newContext({viewport: {width: 1440, height: 1000}});
   const errors = [],viewerInputs=[];
-  async function view(url,viewerContext=context) { const page = await viewerContext.newPage();if(rtcEnabled)await page.addInitScript(forceRelay=>{const RealRTC=RTCPeerConnection;globalThis.__rtc=[];globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(forceRelay?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};},useTURN); page.on('pageerror',e=>errors.push(e.message));if(rtcEnabled)page.on('console',m=>{if(m.text().includes('TabShare RTC'))console.log(m.text());});page.on('websocket',socket=>{socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}});}); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
+  async function view(url,viewerContext=context) { const page = await viewerContext.newPage();if(rtcEnabled)await page.addInitScript(forceRelay=>{const RealRTC=RTCPeerConnection;globalThis.__rtc=[];globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(forceRelay?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};},useTURN); page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/api/clipboard/'))clipboardUploads++;});page.on('pageerror',e=>errors.push(e.message));if(rtcEnabled)page.on('console',m=>{if(m.text().includes('TabShare RTC'))console.log(m.text());});page.on('websocket',socket=>{socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}});}); await page.goto(url); await page.locator('#surface').waitFor({state:'visible',timeout:20000}).catch(async error=>{console.log('Initial connection diagnostics:',{status:await page.locator('#status').textContent(),errors,failures:commandFailures.slice(-4),packets:packets.slice(-4).map(p=>({nodes:p.document.nodes.length,meta:p.document.meta})),targets:vm.runInContext('[...targets].map(([id,t])=>({id,context:t.contextId,history:t.navigation}))',sandbox)});throw error;}); await page.locator('#dot.live').waitFor({state:'attached'}); return page; }
   if(realSites){
     const {runRealSites}=await import('./real-sites.mjs');
     await runRealSites({root,request,view,cdp,chrome,getTabs,sessions,packets,videoGeometries,errors,commandFailures,resourceReads});
   }else{
+  async function navigate(page,url){if(!await page.locator('#share-settings').isVisible())await page.locator('#share-settings-toggle').click();await page.locator('#address').fill(url);await page.locator('#address').press('Enter');await page.locator('#share-settings-toggle').click();}
   const one = await view(share.value.shareUrl);
   const two = await view(share.value.shareUrl);
+  await until(()=>one.locator('#follow-viewport').isChecked(),'first viewer automatically drives full-window layout');
+  await one.locator('#surface').evaluate(e=>{const stage=document.querySelector('#stage').getBoundingClientRect();if(stage.x!==0||stage.y!==0||stage.width!==innerWidth||stage.height!==innerHeight)throw Error('outer chrome consumes shared viewport');});
+  const handle=one.locator('#share-settings-toggle');assert.equal(await handle.textContent(),'共享设置');const beforeDrag=await handle.boundingBox();
+  await one.mouse.move(beforeDrag.x+20,beforeDrag.y+20);await one.mouse.down();await one.mouse.move(beforeDrag.x-130,beforeDrag.y-130,{steps:8});await one.mouse.up();
+  assert.equal(await one.locator('#share-settings').isVisible(),false,'dragging must not open settings');
+  const afterDrag=await handle.boundingBox();assert.ok(afterDrag.x<beforeDrag.x-100&&afterDrag.y<beforeDrag.y-100);
+  await handle.click();assert.equal(await one.locator('#share-settings').isVisible(),true);await handle.click();
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
   const remoteOne=one.frameLocator('#mirror'),remoteTwo=two.frameLocator('#mirror');
   const rtcInspect=()=>chrome.runtime.sendMessage({target:'offscreen',type:'inspect'});
@@ -205,7 +213,8 @@ try {
     await until(async()=>(await rtcInspect()).peers.some(p=>p.stats.compressed>0&&p.stats.saved>1000),'real compressed DOM state');
     console.log('PASS: RTC failure, fresh fallback DOM, control continues, automatic WebRTC recovery');
   }
-  const beforeDirectDOM=relayDocuments,beforeDirectInputs=relayInputs;
+  await until(()=>one.locator('#surface').getAttribute('data-syncing').then(v=>v==='false'),'initial progressive DOM complete');
+  const editStart=packets.length;const beforeDirectDOM=relayDocuments,beforeDirectInputs=relayInputs;
   const initial=packets.find(p=>p.document.reset);assert.ok(initial,'one initial DOM snapshot');
   await remoteOne.locator('button').click();await until(()=>state.clicks===1,'first viewer real click');
   await remoteTwo.locator('button').click();await until(()=>state.clicks===2,'second viewer real click');
@@ -215,7 +224,7 @@ try {
   await until(()=>state.text==='hello你好 pasted','remote paste').catch(async error=>{console.log('Paste diagnostic:',{text:state.text,inputs:receivedInputs.filter(i=>i.action==='text').slice(-5),local:await remoteOne.locator('#text').evaluate(e=>({value:e.value,start:e.selectionStart,end:e.selectionEnd}))});throw error;});
   await one.keyboard.press('Backspace');await until(()=>state.text==='hello你好 paste','remote special key').catch(async error=>{console.log('Key diagnostic:',{text:state.text,inputs:receivedInputs.filter(i=>i.action==='keyDown').slice(-2),local:await remoteOne.locator('#text').evaluate(e=>({value:e.value,start:e.selectionStart,end:e.selectionEnd}))});throw error;});
   await until(()=>packets.some(p=>!p.document.reset),'batched mutation delta arrives');
-  const deltas=packets.filter(p=>!p.document.reset);assert.ok(deltas.length,'mutation deltas emitted');
+  const deltas=packets.slice(editStart).filter(p=>!p.document.reset);assert.ok(deltas.length,'mutation deltas emitted');
   assert.ok(deltas.every(p=>p.document.nodes.length===0),'typing uses node/property deltas, never full trees');
   assert.ok(Math.max(...deltas.map(p=>p.bytes))<initial.bytes/2,'edits use less bandwidth than a snapshot');
   await new Promise(resolve=>setTimeout(resolve,500));const idle=packets.length;
@@ -233,20 +242,30 @@ try {
   await until(()=>remoteOne.locator('#text').inputValue().then(v=>v==='hello你好 paste'),'authoritative native input rendering');
   if(rtcEnabled){assert.equal(relayDocuments,beforeDirectDOM,'DOM edits bypass Go relay');assert.equal(relayInputs,beforeDirectInputs,'input bypasses Go relay');}
   console.log('PASS: native DOM rendering, two viewers, real input/Chinese/paste/keys, sparse deltas, no idle packets');
+  await context.grantPermissions(['clipboard-read','clipboard-write'],{origin});await one.bringToFront();
+  await remoteOne.locator('#image-paste').click();
+  await one.evaluate(async()=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=2;canvas.getContext('2d').fillRect(0,0,2,2);const png=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);});
+  await one.keyboard.press('Control+V');await until(()=>state.imageMime==='image/png'&&state.imageBytes>0,'real clipboard image reaches original page');
+  await new Promise(r=>setTimeout(r,250));assert.equal(state.imagePastes,1,'one gesture must paste one image');
+  if(rtcEnabled)assert.equal(clipboardUploads,0,'clipboard image bypasses HTTP when peer is ready');
+  await remoteOne.locator('#context-zone').click({button:'right'});await remoteOne.locator('#context-action').waitFor();await until(()=>one.locator('#page-context-menu').isHidden(),'custom webpage context menu replaces viewer fallback menu');await remoteOne.locator('#context-action').click();await until(()=>state.contextClicked,'original webpage context action');
+  console.log('Image paste event trusted:',state.imageTrusted);console.log('PASS: real Ctrl+V image paste through '+(rtcEnabled?'peer asset channel':'authenticated HTTP')+', webpage context menu and native input context handling');
   const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
+  await one.locator('#share-settings-toggle').click();await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
+  await until(()=>sourceMetrics().then(m=>m.width!==1440),'restore source before independent display checks');
   const nativeMetrics=await sourceMetrics();
-  async function assertFits(page){await until(()=>page.evaluate(()=>{const stage=document.querySelector('#stage'),surface=document.querySelector('#surface'),style=getComputedStyle(stage),box=surface.getBoundingClientRect();return box.width<=stage.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)+1&&box.height<=stage.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom)+1&&document.documentElement.scrollWidth<=innerWidth;}),'shared surface fits available window');}
+  async function assertFits(page){await until(()=>page.evaluate(()=>{const stage=document.querySelector('#stage'),surface=document.querySelector('#surface'),style=getComputedStyle(stage),box=surface.getBoundingClientRect();return (document.querySelector('#display-sizing').value==='cover'?box.width>=stage.clientWidth-1&&box.height>=stage.clientHeight-1:box.width<=stage.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)+1&&box.height<=stage.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom)+1)&&document.documentElement.scrollWidth<=innerWidth;}),'shared surface fits available window');}
   for(const size of [{width:390,height:844},{width:390,height:260},{width:844,height:390},{width:3840,height:2160}]){await one.setViewportSize(size);await assertFits(one);const before=state.clicks;await remoteOne.locator('#click').click();await until(()=>state.clicks===before+1,'scaled DOM click at '+size.width+'x'+size.height);}
   assert.equal((await sourceMetrics()).width,nativeMetrics.width,'independent fitting never changes source resolution');
-  await one.setViewportSize({width:390,height:260});await assertFits(one);await one.locator('#share-settings-toggle').click();
+  await one.setViewportSize({width:390,height:180});await assertFits(one);await one.locator('#share-settings-toggle').click();
   await one.locator('#display-sizing').selectOption('width');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollHeight>e.clientHeight;}),'fit-width allows local vertical pan');
   await one.locator('#display-sizing').selectOption('actual');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollWidth>e.clientWidth&&Number(document.querySelector('#surface').dataset.scale)===1;}),'original size allows horizontal and vertical pan');
   assert.notEqual(await one.locator('#surface').getAttribute('data-scale'),await two.locator('#surface').getAttribute('data-scale'),'visitors have independent display settings');
   await one.locator('#display-zoom').fill('150');assert.equal(await one.locator('#display-sizing').inputValue(),'custom');await until(()=>one.locator('#surface').getAttribute('data-scale').then(s=>s==='1.5'),'custom zoom');
   await one.locator('#display-sizing').selectOption('fit');await one.locator('#share-settings-toggle').click();await one.setViewportSize({width:390,height:844});await assertFits(one);
-  await one.bringToFront();await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!!document.fullscreenElement),'fullscreen enters').catch(async error=>{console.log('Fullscreen state:',await one.evaluate(()=>({enabled:document.fullscreenEnabled,visible:document.visibilityState,status:document.querySelector('#status').textContent})));throw error;});await assertFits(one);await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!document.fullscreenElement),'fullscreen exits');
+  await one.bringToFront();await one.locator('#share-settings-toggle').click();await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!!document.fullscreenElement),'fullscreen enters').catch(async error=>{console.log('Fullscreen state:',await one.evaluate(()=>({enabled:document.fullscreenEnabled,visible:document.visibilityState,status:document.querySelector('#status').textContent})));throw error;});await assertFits(one);await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!document.fullscreenElement),'fullscreen exits');
   await one.evaluate(()=>Object.defineProperty(document,'fullscreenEnabled',{configurable:true,value:false}));await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>document.body.classList.contains('immersive')&&!document.fullscreenElement),'browser without fullscreen uses immersive display');await assertFits(one);await one.locator('#fullscreen').click();await one.evaluate(()=>{delete document.fullscreenEnabled;});
-  await one.locator('#share-settings-toggle').click();await one.locator('#follow-viewport').check();
+  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#follow-viewport').check();
   await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.height>=240;},'shared viewport adapts source layout');
   await until(()=>remoteTwo.locator('#responsive').evaluate(e=>getComputedStyle(e).backgroundColor==='rgb(210, 240, 220)'),'responsive CSS is computed on source and shared with other viewers');
   const followedSize=await sourceMetrics();await one.locator('#display-zoom').fill('150');await new Promise(resolve=>setTimeout(resolve,650));assert.equal((await sourceMetrics()).width,followedSize.width,'local zoom does not resize shared layout');await one.locator('#display-sizing').selectOption('fit');
@@ -262,23 +281,32 @@ try {
   await phone.setViewportSize({width:844,height:390});await until(async()=>(await sourceMetrics()).width>600,'driving viewer rotation updates source width');
   await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"screen.orientation.type==='landscape-primary'",returnByValue:true}).then(r=>r.result.value),'source orientation follows driving viewer');
   await phone.setViewportSize({width:390,height:844});await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'driving viewer rotates back');
-  await phone.locator('[name=share-mode][value=raster]').check();await phone.locator('#share-settings-toggle').click();await phone.locator('#fallback').waitFor({state:'visible'});await assertFits(phone);
-  let phoneMetrics=await sourceMetrics();if(rtcEnabled)await until(()=>phone.locator('#stream').evaluate((v,width)=>v.readyState>=2&&v.videoWidth>=width,phoneMetrics.width),'WebRTC video matches CSS resolution').catch(async error=>{console.log('Source frames:',sourceFrames,'offscreen frames:',offscreenFrames,'commands',videoCommands);console.log('Sender tracks:',await cdp.evaluate(offscreenSession,'__rtc.map(p=>p.getSenders().map(s=>s.track?{state:s.track.readyState,enabled:s.track.enabled}:null))'));console.log('Video receiver:',await phone.locator('#stream').evaluate(v=>({width:v.videoWidth,height:v.videoHeight,ready:v.readyState,paused:v.paused,tracks:v.srcObject?.getTracks().map(t=>({state:t.readyState,muted:t.muted}))})));console.log('Media stats:',await cdp.evaluate(offscreenSession,'Promise.all(__rtc.map(async p=>[...(await p.getStats()).values()].filter(s=>s.type==="outbound-rtp").map(s=>({frames:s.framesEncoded,width:s.frameWidth,height:s.frameHeight,bytes:s.bytesSent}))))'));throw error;});else await until(()=>phone.locator('#fallback').evaluate((image,width)=>image.naturalWidth===width*2,phoneMetrics.width),'retina bitmap is twice CSS width');
-  const pixels=await phone.locator('#fallback').boundingBox(),tapX=pixels.x+85*pixels.width/phoneMetrics.width,tapY=pixels.y+80*pixels.height/phoneMetrics.height;
-  const beforeTouch=state.clicks;await phone.touchscreen.tap(tapX,tapY);await until(()=>state.clicks===beforeTouch+1,'retina raster touch click');
-  const gesture=await phoneContext.newCDPSession(phone);const x=pixels.x+pixels.width*.65,startY=pixels.y+pixels.height*.75,endY=pixels.y+pixels.height*.4;
+  await phone.locator('#share-settings-toggle').click();await phone.locator('#mirror').waitFor({state:'visible'});assert.equal(await phone.locator('#fallback').isVisible(),false);await assertFits(phone);
+  const phoneButton=phone.frameLocator('#mirror').locator('#click'),pixels=await phoneButton.boundingBox();
+  const beforeTouch=state.clicks;await phone.touchscreen.tap(pixels.x+pixels.width/2,pixels.y+pixels.height/2);await until(()=>state.clicks===beforeTouch+1,'DPR2 native DOM touch click');
+  const gesture=await phoneContext.newCDPSession(phone);const x=250,startY=600,endY=300;
   await gesture.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y:startY}]});
   for(let step=1;step<=5;step++){await gesture.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x,y:startY+(endY-startY)*step/5}]});await new Promise(resolve=>setTimeout(resolve,60));}
-  await gesture.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await until(async()=>(await sourceMetrics()).scroll>50,'raster touch swipe scrolls original page');assert.equal(state.clicks,beforeTouch+1,'swipe never becomes a source click');
-  await phone.locator('#share-settings-toggle').click();await phone.locator('[name=share-mode][value=dom]').check();await phoneContext.close();
+  await gesture.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await until(async()=>(await sourceMetrics()).scroll>50,'native DOM touch swipe scrolls original page');assert.equal(state.clicks,beforeTouch+1,'swipe never becomes a source click');
+  await phoneContext.close();
   await until(async()=>{const m=await sourceMetrics();return m.width===nativeMetrics.width&&m.height===nativeMetrics.height&&m.dpr===nativeMetrics.dpr;},'driver disconnect restores native source viewport');
   await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'scrollTo(0,0)'});await until(async()=>(await sourceMetrics()).scroll===0,'restore source scroll');
   await one.setViewportSize({width:1440,height:1000});await assertFits(one);await one.screenshot({path:path.join(root,'test-results/responsive-display.png')}).catch(async()=>{await mkdir(path.join(root,'test-results'),{recursive:true});await one.screenshot({path:path.join(root,'test-results/responsive-display.png')});});
-  console.log('PASS: phone/landscape/4K fit, independent width/original/zoom, full screen, source responsive reflow, driver handoff/restoration, DPR2 raster tap and touch swipe');
-  await one.locator('#address').fill(sourceURL.replace('/fixture', '/next')); await one.locator('#address').press('Enter');
+  console.log('PASS: phone/landscape/4K fit, independent width/original/zoom, full screen, source responsive reflow, driver handoff/restoration, DPR2 native DOM tap and touch swipe');
+  await navigate(one,sourceURL.replace('/fixture','/next'));
   await until(() => state.path === '/next', 'shared browser navigation');
   assert.ok(state.cookie.includes('shared-login=present'), 'shared browser preserves login cookies');
   await remoteOne.locator('h1').filter({hasText:'/next'}).waitFor({state:'visible'});
+  await until(()=>one.evaluate(()=>decodeURIComponent(location.hash).includes('/next')),'source URL reflected in hash');
+  await one.goBack();await remoteOne.locator('h1').filter({hasText:'/fixture'}).waitFor();await until(()=>two.evaluate(()=>decodeURIComponent(location.hash).includes('/fixture')),'other visitor follows native back');
+  await one.goForward();await remoteOne.locator('h1').filter({hasText:'/next'}).waitFor();
+  await one.reload();await remoteOne.locator('h1').filter({hasText:'/next'}).waitFor();await until(()=>one.locator('#dot').getAttribute('class').then(c=>c==='live'),'refresh keeps capability separate from hash route');
+  await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"const spa=document.createElement('button');spa.id='spa';spa.textContent='SPA';spa.style.cssText='left:250px;top:220px';spa.onclick=()=>history.pushState({},'',location.pathname+'?spa=1#section');document.body.append(spa)"});
+  await remoteOne.locator('#spa').click();await until(()=>one.evaluate(()=>decodeURIComponent(location.hash).includes('?spa=1#section')),'SPA pushState updates shared hash');
+  await one.goBack();await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'location.search',returnByValue:true}).then(r=>r.result.value===''),'native back traverses same-document source history');
+  await one.goForward();await until(()=>two.evaluate(()=>decodeURIComponent(location.hash).includes('?spa=1#section')),'same-document forward synchronizes second visitor');
+  await one.goBack();await until(()=>one.evaluate(()=>!decodeURIComponent(location.hash).includes('?spa=1')),'return from SPA route');
+  console.log('PASS: full viewport without outer chrome, draggable settings, hash URL, native browser back/forward and reload');
   const box=await one.locator('#mirror').boundingBox();await one.mouse.move(box.x+box.width/2,box.y+box.height/2);await one.mouse.wheel(0,500);
   await new Promise(resolve=>setTimeout(resolve,1200));
   await until(()=>state.scroll>0,'real tab scrolling',6000).catch(async error=>{console.log('Scroll wire:',viewerInputs.filter(i=>i.action==='scroll'),receivedInputs.filter(i=>i.action==='scroll'),actions.slice(-5));console.log('Recent deltas:',packets.slice(-4).map(p=>({reset:p.document.reset,root:p.document.root,nodes:p.document.nodes.map(n=>({id:n.id,tag:n.tag})),updates:p.document.updates,removes:p.document.removes})));console.log('Frame:',await one.locator('#mirror').evaluate(f=>({url:f.contentWindow.location.href,body:!!f.contentDocument.body,html:f.contentDocument.documentElement.outerHTML.slice(0,500)})),errors);throw error;});
@@ -299,18 +327,33 @@ try {
   const newTab=(await getTabs()).find(t=>t.targetId===newSources[0].targetId);
   if(rtcEnabled)await until(async()=>{const capture=(await rtcInspect()).captures.find(c=>c.tabId===newTab.id);return capture?.width===200&&capture.height===90;},'source encodes only the canvas region, not the full viewport');
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"const overlay=document.createElement('div');overlay.id='overlay';overlay.style.cssText='position:absolute;left:45px;top:365px;width:150px;height:60px;background:red;z-index:99';document.body.append(overlay)"});
-  await reopened.locator('#fallback').waitFor({state:'visible'});
+  await reopened.frameLocator('#mirror').locator('#overlay').waitFor({state:'visible'});assert.equal(await reopened.locator('#fallback').isVisible(),false);assert.equal(await reopened.locator('#mirror').isVisible(),true);
+  if(rtcEnabled)await until(()=>mirroredCanvas.locator('canvas[data-raster]').evaluate(c=>c.getContext('2d').getImageData(20,20,1,1).data[3]===0),'DOM overlay masks regional video pixels');
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#overlay').remove()"});
   await reopened.locator('#mirror').waitFor({state:'visible'});
-  await until(()=>mirroredCanvas.locator('[data-raster]').evaluate(image=>{const canvas=image.tagName==='CANVAS'?image:document.createElement('canvas');if(image.tagName!=='CANVAS'){if(!image.complete||!image.naturalWidth)return false;canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;}const ctx=canvas.getContext('2d');if(image.tagName!=='CANVAS')ctx.drawImage(image,0,0);const pixel=ctx.getImageData(20,20,1,1).data;return pixel[0]<10&&pixel[1]<10&&pixel[2]<10;}),'fresh region image after overlay removal');
+  await until(()=>mirroredCanvas.locator('[data-raster]').evaluate(image=>{const canvas=image.tagName==='CANVAS'?image:document.createElement('canvas');if(image.tagName!=='CANVAS'){if(!image.complete||!image.naturalWidth)return false;canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;}const ctx=canvas.getContext('2d');if(image.tagName!=='CANVAS')ctx.drawImage(image,0,0);const pixel=ctx.getImageData(20,20,1,1).data;return pixel[0]<10&&pixel[1]<10&&pixel[2]<10;}),'fresh region image after overlay removal').catch(async error=>{console.log('Source region diagnostic:',await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"(()=>{const c=document.querySelector('#canvas'),r=c.getBoundingClientRect();return {scrollY,rect:r.toJSON(),pixel:[...c.getContext('2d').getImageData(20,20,1,1).data],overlay:!!document.querySelector('#overlay')}})()",returnByValue:true}).then(r=>r.result.value));console.log('Region diagnostic:',await mirroredCanvas.locator('[data-raster]').evaluate(image=>({tag:image.tagName,ready:image.complete,width:image.naturalWidth,src:image.src?.slice(0,40),style:image.getAttribute('style'),pixel:(()=>{try{const c=document.createElement('canvas');c.width=image.naturalWidth||image.width;c.height=image.naturalHeight||image.height;const x=c.getContext('2d');x.drawImage(image,0,0);return [...x.getImageData(20,20,1,1).data];}catch(e){return e.message;}})()})),errors);throw error;});
+  await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#canvas').style.left='-50px'"});
+  await until(()=>mirroredCanvas.locator('[data-raster]').evaluate(n=>Math.abs(parseFloat(n.style.left)-50)<1&&Math.abs(parseFloat(n.style.width)-150)<1),'partially offscreen canvas is cropped without stretching');
+  assert.equal(await reopened.locator('#fallback').isVisible(),false);
+  await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#canvas').style.left='40px'"});
+  await until(()=>mirroredCanvas.locator('[data-raster]').evaluate(n=>parseFloat(n.style.left)===0&&parseFloat(n.style.width)===200),'regional canvas returns to full visible width');
   if(rtcEnabled){
+    await reopened.bringToFront();await until(async()=>(await rtcInspect()).peers.some(p=>p.tabId===newTab.id&&p.profile.visible&&p.video.maxFramerate>2),'foreground regional video budget');
     // CDP drives real canvas changes without relying on hidden-tab JS timer scheduling.
     let drawing=false,videoAnimationError;videoAnimation=setInterval(async()=>{if(drawing)return;drawing=true;try{await cdp.evaluate(sessions.get(newTab.id),"(()=>{const c=document.querySelector('#canvas'),ctx=c.getContext('2d');ctx.fillStyle='rgb('+Math.floor(Math.random()*255)+',0,0)';ctx.fillRect(0,0,200,90)})()");}catch(error){videoAnimationError=error;}finally{drawing=false;}},33);
-    const start=await reopened.locator('#stream').evaluate(v=>v.getVideoPlaybackQuality().totalVideoFrames);
+    const sourceStart=sourceFrames,offscreenStart=offscreenFrames;const start=await reopened.locator('#stream').evaluate(v=>v.getVideoPlaybackQuality().totalVideoFrames);
     await new Promise(resolve=>setTimeout(resolve,2100));const end=await reopened.locator('#stream').evaluate(v=>v.getVideoPlaybackQuality().totalVideoFrames);
-    clearInterval(videoAnimation);if(videoAnimationError)throw videoAnimationError;assert.ok(end-start>12,'video exceeds emergency screenshot cap');console.log('PASS: continuous encoded WebRTC video:',end-start,'decoded frames in 2.1 s');
+    clearInterval(videoAnimation);await until(()=>!drawing,'last canvas animation paint completed');if(videoAnimationError)throw videoAnimationError;assert.ok(end-start>12,'video exceeds emergency screenshot cap: '+JSON.stringify({frames:end-start,capture:await rtcInspect(),sourceFrames:sourceFrames-sourceStart,offscreenFrames:offscreenFrames-offscreenStart,source:vm.runInContext('[...targets].map(([id,t])=>({id,videoFPS:t.videoFPS,frameBusy:t.frameBusy,streaming:t.streaming}))',sandbox)}));console.log('PASS: continuous encoded WebRTC video:',end-start,'decoded frames in 2.1 s');
   }
-  console.log('PASS: canvas region pixels and real input; overlapping overlay switches to full frame then restores DOM');
+  if(rtcEnabled){
+    const samples=[];for(const color of [[0,210,40],[40,40,220],[220,190,0]]){
+      const begin=performance.now();await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"(()=>{const c=document.querySelector('#canvas').getContext('2d');c.fillStyle='rgb("+color.join(',')+")';c.fillRect(0,0,200,90)})()"});
+      const end=Date.now()+1500;let visible=false;while(Date.now()<end){visible=await mirroredCanvas.locator('canvas[data-raster]').evaluate((c,expected)=>{const p=c.getContext('2d').getImageData(20,20,1,1).data;return expected.every((v,i)=>Math.abs(v-p[i])<35);},color);if(visible)break;await new Promise(r=>setTimeout(r,10));}
+      assert.ok(visible,'regional video must show a fresh source paint');samples.push(Math.round(performance.now()-begin));
+    }
+    console.log('Regional paint-to-visible latency (ms):',samples);
+  }
+  console.log('PASS: canvas region pixels and real input; overlapping overlay preserves DOM and only masks regional video');
   await reopened.screenshot({path:path.join(root,'test-results/shared-dom.png')});
   console.log('PASS: URL share reopens a closed tab; tab-only share never opens replacement');
   if(rtcEnabled){
@@ -321,7 +364,7 @@ try {
     console.log('PASS: source-side regional video encoding, compressed DOM and automatic background/foreground video budgets');
   }
   const beforeDirectResources=resourceUploads;
-  await reopened.locator('#address').fill(sourceURL.replace('/fixture','/compat'));await reopened.locator('#address').press('Enter');
+  await navigate(reopened,sourceURL.replace('/fixture','/compat'));
   const compatibility=reopened.frameLocator('#mirror');await compatibility.locator('#closed-button').waitFor({state:'visible'});
   assert.equal(await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#shadow-host').shadowRoot===null",returnByValue:true}).then(r=>r.result.value),true,'fixture uses a closed shadow root');
   await compatibility.locator('#closed-button').click();await until(()=>state.shadowClicked,'closed shadow control');
@@ -350,17 +393,22 @@ try {
   await compatibility.locator('#show-popover').click();await until(()=>compatibility.locator('#native-popover').evaluate(e=>e.matches(':popover-open')),'native popover top layer');
   // The fixed control exists on the source, is isolated from site CSS, and is excluded from the DOM mirror.
   assert.equal(await compatibility.locator('[data-tabshare-owner-ui]').count(),0,'owner controls excluded from mirror');
+  await chrome.debugger.sendCommand({tabId:newTab.id},'Page.bringToFront');
   const ownerRoot=(await chrome.debugger.sendCommand({tabId:newTab.id},'DOM.getDocument',{depth:-1,pierce:true})).root;
   const findOwner=n=>n.attributes?.includes('data-tabshare-owner-ui')?n:(n.children||[]).map(findOwner).find(Boolean);const owner=findOwner(ownerRoot);assert.ok(owner,'source fixed sharing button exists');
   const object=(await chrome.debugger.sendCommand({tabId:newTab.id},'DOM.resolveNode',{backendNodeId:owner.shadowRoots[0].backendNodeId})).object;
-  await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:"function(){this.querySelector('button').click();this.querySelector('input[value=raster]').click()}"});
-  await reopened.locator('#fallback').waitFor({state:'visible'});await until(()=>local.sessionModes?.[share.value.session.id]==='raster','owner choice persisted');
-  await reopened.locator('#share-settings-toggle').click();await reopened.locator('[name=share-mode][value=dom]').check();await reopened.locator('#mirror').waitFor({state:'visible'});await compatibility.locator('#closed-button').waitFor();
-  assert.equal((await getTabs()).find(t=>t.id===newTab.id).targetId,newSources[0].targetId,'mode switch keeps original source tab');
-  await reopened.locator('#share-settings-toggle').click();
+  const ownerButton=await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:"function(){const b=this.querySelector('button'),r=b.getBoundingClientRect();this.probe=[];for(const type of ['pointerdown','pointermove'])b.addEventListener(type,e=>this.probe.push({type:e.type,primary:e.isPrimary,id:e.pointerId,x:e.clientX,y:e.clientY}));return {label:b.textContent,x:r.x,y:r.y,width:r.width,height:r.height,hit:document.elementFromPoint(r.x+20,r.y+20)?.outerHTML.slice(0,180),inner:[innerWidth,innerHeight],outer:[outerWidth,outerHeight],modal:[...document.querySelectorAll(':modal')].map(n=>n.tagName)}}",returnByValue:true});
+  const ob=ownerButton.result.value;assert.equal(ob.label,'共享设置');
+  for(const [type,x,y] of [['mouseMoved',ob.x+20,ob.y+20],['mousePressed',ob.x+20,ob.y+20],['mouseMoved',100,100],['mouseReleased',100,100]])await chrome.debugger.sendCommand({tabId:newTab.id},'Input.dispatchMouseEvent',{type,x,y,button:type==='mouseMoved'&&x!==100?'none':'left',buttons:type==='mousePressed'||type==='mouseMoved'&&x===100?1:0,clickCount:1});
+  const ownerPosition=await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:"function(){const r=this.querySelector('button').getBoundingClientRect();return {x:r.x,y:r.y,hidden:this.querySelector('section').hidden,events:this.probe}}",returnByValue:true});
+  assert.ok(ownerPosition.result.value.x<150&&ownerPosition.result.value.y<150,JSON.stringify({before:ob,after:ownerPosition.result.value}));assert.equal(ownerPosition.result.value.hidden,true,'owner dragging does not open settings');
+  await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.callFunctionOn',{objectId:object.objectId,functionDeclaration:"function(){this.querySelector('button').click();this.querySelector('button').click()}"});
+  await reopened.locator('#mirror').waitFor({state:'visible'});assert.equal(await compatibility.locator('[data-tabshare-owner-ui]').count(),0);
+  // Move the owner UI away from controls before exercising the source popup.
+  await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('[data-tabshare-owner-ui]').style.setProperty('left','1000px','important')"});
   await compatibility.locator('#open-popup').click();await compatibility.locator('h1').filter({hasText:'Shared induced popup'}).waitFor({state:'visible',timeout:20000});await compatibility.locator('button').click();await compatibility.locator('#closed-button').waitFor({state:'visible',timeout:20000});assert.equal((await getTabs()).find(t=>t.id===newTab.id).targetId,newSources[0].targetId,'popup closes back to original source');
-  console.log('PASS: cookie-bound cross-origin image/CSS/font relay, closed Shadow DOM, pseudo content, trusted rich text selection, JS prompt, native modal/popover, owner and visitor mode controls, induced popup and return');
-  await reopened.locator('#address').fill(sourceURL);await reopened.locator('#address').press('Enter');await reopened.frameLocator('#mirror').locator('#click').waitFor();
+  console.log('PASS: cookie-bound cross-origin image/CSS/font relay, closed Shadow DOM, pseudo content, trusted rich text selection, JS prompt, native modal/popover, owner and visitor draggable settings, induced popup and return');
+  await navigate(reopened,sourceURL);await reopened.frameLocator('#mirror').locator('#click').waitFor();
   await stop(server); startServer();
   await until(async () => (await fetch(origin + '/healthz')).ok, 'server restart');
   await until(() => reopened.locator('#dot').getAttribute('class').then(c => c === 'live'), 'agent and viewer reconnect after restart', 25000);

@@ -33,3 +33,8 @@ test('wheel line and page units become bounded CSS-pixel deltas',()=>{
   assert.deepEqual(wheelPixels({deltaX:2,deltaY:3,deltaMode:1},800),{deltaX:32,deltaY:48});
   assert.deepEqual(wheelPixels({deltaX:0,deltaY:2,deltaMode:2},800),{deltaX:0,deltaY:1600});
 });
+
+test('cover fills a different aspect ratio and keeps overflow available for panning',()=>{
+ const size=displayLayout({width:1440,height:1000},{width:390,height:844},'cover');
+ assert.ok(size.width>=390&&size.height>=844);assert.equal(size.areaWidth,size.width);assert.equal(size.areaHeight,844);
+});

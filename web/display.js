@@ -5,7 +5,7 @@ export function displayLayout(source,available,mode='fit',zoom=1) {
   const {width,height}=source||{};
   if(!Number.isFinite(width)||!Number.isFinite(height)||width<=0||height<=0||width>16384||height>16384)return null;
   if(!Number.isFinite(available.width)||!Number.isFinite(available.height)||available.width<=0||available.height<=0)return null;
-  let scale=mode==='actual'?1:mode==='custom'?clamp(zoom,.25,2):mode==='width'?available.width/width:Math.min(available.width/width,available.height/height);
+  let scale=mode==='actual'?1:mode==='custom'?clamp(zoom,.25,2):mode==='width'?available.width/width:mode==='cover'?Math.max(available.width/width,available.height/height):Math.min(available.width/width,available.height/height);
   scale=clamp(scale,.001,4);
   return {scale,width:width*scale,height:height*scale,areaWidth:Math.max(available.width,width*scale),areaHeight:Math.max(available.height,height*scale)};
 }

@@ -8,7 +8,7 @@ async function streamBytes(stream,limit){
   const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return bytes;
 }
 export async function compressPacket(bytes){
-  if(bytes.length<16384||bytes[0]!==1||typeof CompressionStream!=='function')return bytes;
+  if(bytes.length<8192||bytes[0]!==1||typeof CompressionStream!=='function')return bytes;
   let gzip;try{gzip=await streamBytes(new Blob([bytes.subarray(1)]).stream().pipeThrough(new CompressionStream('gzip')),LIMIT);}catch{return bytes;}
   if(gzip.length+5>=bytes.length*.9)return bytes;
   const packet=new Uint8Array(gzip.length+5);packet[0]=3;new DataView(packet.buffer).setUint32(1,bytes.length-1);packet.set(gzip,5);return packet;
@@ -36,7 +36,7 @@ export class PeerLink {
     this.channels=new Map();this.pendingICE=[];this.closed=false;this.ready=false;this.serial=0;this.queued=0;this.waiters=new Set();this.profile={width:1920,height:1080,visible:true};this.stats={sent:0,received:0,compressed:0,saved:0};
     this.pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});
     this.pc.onicecandidate=e=>{if(e.candidate)this.signal({attempt:this.attempt,candidate:e.candidate.toJSON()});};
-    this.pc.ontrack=e=>track?.(new MediaStream([e.track]));
+    this.pc.ontrack=e=>{try{e.receiver.jitterBufferTarget=0;e.receiver.playoutDelayHint=0;}catch{}track?.(new MediaStream([e.track]));};
     this.pc.onconnectionstatechange=()=>{if(['failed','closed'].includes(this.pc.connectionState))this.close();if(this.pc.connectionState==='disconnected'){clearTimeout(this.lost);this.lost=setTimeout(()=>this.close(),8000);}else clearTimeout(this.lost);};
     this.pc.ondatachannel=e=>this.channel(e.channel);this.timeout=setTimeout(()=>this.close(),15000);
     if(host){this.sender=this.pc.addTransceiver('video',{direction:'sendonly'}).sender;for(const name of ['state','input','assets'])this.channel(this.pc.createDataChannel(name,{ordered:true}));}
@@ -52,9 +52,9 @@ export class PeerLink {
     c.onclose=()=>this.close();c.onerror=()=>this.close();
     c.onmessage=e=>{
       try{
-        if(this.host&&c.label!=='input'||!this.host&&c.label==='input')throw Error('Unexpected channel direction');
+        if(this.host&&!['input','assets'].includes(c.label)||!this.host&&c.label==='input')throw Error('Unexpected channel direction');
         if(!(e.data instanceof ArrayBuffer)||e.data.byteLength<13||e.data.byteLength>CHUNK+12)throw Error('Invalid fragment');
-        const view=new DataView(e.data),id=view.getUint32(0),total=view.getUint32(4),offset=view.getUint32(8),payload=new Uint8Array(e.data,12),limit=c.label==='input'?16384:LIMIT;
+        const view=new DataView(e.data),id=view.getUint32(0),total=view.getUint32(4),offset=view.getUint32(8),payload=new Uint8Array(e.data,12),limit=c.label==='input'?16384:this.host&&c.label==='assets'?4*1024*1024+4101:LIMIT;
         if(total<1||total>limit||offset+payload.length>total)throw Error('Invalid size');
         let part=entry.parts.get(id);
         if(!part){if(offset!==0||entry.parts.size>=4||entry.retained+total>QUEUE)throw Error('Receive budget');part={bytes:new Uint8Array(total),next:0,timer:setTimeout(()=>this.close(),c.label==='assets'?120000:30000)};entry.parts.set(id,part);entry.retained+=total;}
@@ -119,7 +119,7 @@ export class PeerLink {
     this.policyDirty=true;if(this.policyTask)return this.policyTask;
     this.policyTask=(async()=>{
       while(this.policyDirty&&!this.closed){this.policyDirty=false;const track=this.sender?.track;if(!track)continue;
-        const params=this.sender.getParameters();if(!params.encodings?.length)params.encodings=[{}];
+        const params=this.sender.getParameters();params.degradationPreference='maintain-framerate';if(!params.encodings?.length)params.encodings=[{}];
         Object.assign(params.encodings[0],encodingPolicy(track.getSettings(),this.profile,this.network));
         await this.sender.setParameters(params).catch(()=>{});
       }

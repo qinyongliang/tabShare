@@ -37,7 +37,10 @@ test('tab sharing does not open a replacement or reuse IDs across browser restar
 });
 test('only explicit page control commands are translated', () => {
   assert.deepEqual(cdpInput({action: 'text', text: '你好'}), ['Input.insertText', {text: '你好'}]);
+  assert.equal(cdpInput({action:'mouseMoved',x:1,y:1,button:'none',buttons:1})[1].button,'left');
+  assert.equal(cdpInput({action:'mouseMoved',x:1,y:1,button:'none',buttons:2})[1].button,'right');
   assert.equal(cdpInput({action: 'mouseWheel', x: 10, y: 20, deltaY: 80})[1].deltaY, 80);
+  assert.deepEqual(cdpInput({action:'navigate',url:'https://example.com/path?q=one#section'}),['Page.navigate',{url:'https://example.com/path?q=one#section'}]);
   assert.throws(() => cdpInput({action: 'Runtime.evaluate'}));
   assert.throws(() => cdpInput({action: 'navigate', url: 'file:///secret'}));
 });

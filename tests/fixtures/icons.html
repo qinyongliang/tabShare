@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html{font:16px system-ui;background:#fafafa;color:#171717}body{margin:0;padding:32px}main{width:400px;text-align:center}button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:42px;margin:12px 0;background:white;border:1px solid #ddd;border-radius:8px;font:inherit}svg{flex:none}#logo{width:50px;height:62px;margin:16px auto 36px}.mask-icon{width:20px;height:20px;background:currentColor;mask:url("/icon.svg") center/contain no-repeat}.inline-mask{width:20px;height:20px;background:#4285f4;mask:url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"%3E%3Cpath d="M10 0L20 20H0Z"/%3E%3C/svg%3E') center/contain no-repeat}
+</style></head><body><main>
+<svg id="logo" viewBox="0 0 50 62"><path d="M0 0H50V62H0Z"/><path fill="white" d="M12 12H38V25H12Z"/><path fill="#ccc" d="M12 25H38V50H12Z"/></svg>
+<p>Log in to OpenCode Console</p>
+<button id="google"><svg width="20" height="20" viewBox="0 0 20 20"><defs><clipPath id="round"><circle cx="10" cy="10" r="9"/></clipPath><linearGradient id="brand" x1="0" x2="1"><stop offset="0" stop-color="#ea4335"/><stop offset=".35" stop-color="#fbbc05"/><stop offset=".65" stop-color="#34a853"/><stop offset="1" stop-color="#4285f4"/></linearGradient></defs><path clip-path="url(#round)" fill="url(#brand)" d="M0 0H20V20H0Z"/><path fill="white" d="M10 4A6 6 0 1 0 16 10H10V13H13A4 4 0 1 1 13 7Z"/></svg>Continue with Google</button>
+<button id="github"><svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M10 1A9 9 0 0 0 7 18.5V16C3 17 3 14 2 14C1 13 2 13 3 14C4 15 5 15 7 15V13C3 13 3 9 5 7V4L8 5H12L15 4V7C17 9 17 13 13 13V18.5A9 9 0 0 0 10 1Z"/></svg>Continue with GitHub</button>
+<button id="sprite"><svg width="20" height="20"><defs><symbol id="check" viewBox="0 0 20 20"><path d="M2 10L7 15L18 3" stroke="currentColor" stroke-width="2" fill="none"/></symbol></defs><use href="#check" width="20" height="20"/></svg>Local symbol</button>
+<button id="external"><svg width="20" height="20"><use href="/sprite.svg#star" width="20" height="20"/></svg>External symbol</button>
+<button id="mask"><span class="mask-icon"></span>CSS mask</button>
+<button id="inline"><span class="inline-mask"></span>Inline SVG mask</button>
+</main></body></html>

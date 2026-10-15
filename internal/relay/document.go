@@ -45,10 +45,10 @@ func cloneMap(in map[string]any) map[string]any {
 	return out
 }
 func (state *documentState) apply(d *Document) error {
-	return state.applyBudget(d, 4<<20)
+	return state.applyBudget(d, 6<<20)
 }
 func (state *documentState) applyBudget(d *Document, budget int) error {
-	if d == nil || len(d.Version) > 80 || d.Version == "" || d.Sequence <= 0 || len(d.Root) > 32 || len(d.Nodes) > 3500 || len(d.Updates) > 3500 || len(d.Removes) > 7000 || len(d.CSS) > 100000 {
+	if d == nil || len(d.Version) > 80 || d.Version == "" || d.Sequence <= 0 || len(d.Root) > 32 || len(d.Nodes) > 30000 || len(d.Updates) > 30000 || len(d.Removes) > 60000 || len(d.CSS) > 100000 {
 		return errors.New("invalid DOM delta")
 	}
 	if !d.Reset && (state.nodes == nil || state.version != d.Version || d.Sequence <= state.sequence) {
@@ -131,7 +131,7 @@ func (state *documentState) applyBudget(d *Document, budget int) error {
 		}
 		bytes += len(encoded) - sizes[id]
 	}
-	if count > 3500 || removed[d.Root] || lookup(d.Root) == nil {
+	if count > 30000 || removed[d.Root] || lookup(d.Root) == nil {
 		return errors.New("invalid document size or root")
 	}
 	css := state.css

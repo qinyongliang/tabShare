@@ -14,7 +14,7 @@ async function offscreen(message) {
   if(!chrome.offscreen)return false;
   if(!offscreenReady&&!offscreenOpening)offscreenOpening=(async()=>{
     const contexts=await chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']});
-    if(!contexts.length)await chrome.offscreen.createDocument({url:'offscreen.html',reasons:['WEB_RTC','USER_MEDIA'],justification:'Shared-tab WebRTC video and authenticated peer data channels'});
+    if(!contexts.length)await chrome.offscreen.createDocument({url:'offscreen.html',reasons:['WEB_RTC','USER_MEDIA','CLIPBOARD'],justification:'Shared-tab WebRTC video and authenticated peer data channels'});
     offscreenReady=true;
   })().finally(()=>{offscreenOpening=null;});
   await offscreenOpening;
@@ -79,7 +79,7 @@ function peerInput(m) {
 function enqueueInput(message){
   const binding=bindings.get(message.sessionId),target=binding&&targets.get(binding.tabId);if(!target)return;
   const member=peers.has(message.sessionId+':'+message.input.viewerId);
-  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{return await control(message);}catch(error){if(bindings.get(message.sessionId)===binding)status(message.sessionId,'error',error.message);}};
+  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);if(['mouseReleased','text','keyDown','scroll'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;target.nextSend=Math.max(Date.now()+25,target.byteDelayUntil||0);clearTimeout(target.inputSnapshot);target.inputSnapshot=setTimeout(()=>void snapshot(binding.tabId),Math.max(30,target.nextSend-Date.now()+5));}return result;}catch(error){if(contextChanged(error)){target.pending=null;target.nextSend=0;return;}if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
   if(message.input.action==='dialog')return run();
   target.inputs??=new InputQueue();
   const key=message.input.action==='mouseMoved'?'move:'+message.input.viewerId:null;
@@ -100,25 +100,35 @@ async function peerSnapshot(sessionId,viewerId) {
   }finally{t.syncing=false;}
 }
 async function backgroundVideo(tabId) {
-  const t=targets.get(tabId);if(!t?.streaming||nativeTabs.has(tabId)||t.frameBusy||Date.now()<(t.nextVideo||0)||Date.now()-(t.lastFrame||0)<500)return;
-  t.frameBusy=true;
+  const t=targets.get(tabId);if(!t?.streaming||nativeTabs.has(tabId)||t.frameBusy||Date.now()<(t.nextVideo||0)||!t.needsFrame&&Date.now()-(t.lastFrame||0)<100)return;
+  t.frameBusy=true;t.needsFrame=false;
   try{
     const {data}=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});
-    const changed=data!==t.lastShot;t.videoIdleDelay=changed?1000/(t.videoFPS||30):Math.min(1000,(t.videoIdleDelay||33)*1.5);t.lastShot=data;
+    const changed=data!==t.lastShot;t.videoIdleDelay=changed?1000/(t.videoFPS||30):Math.min(t.videoFPS===2?1000:250,(t.videoIdleDelay||33)*1.5);t.lastShot=data;
     if(changed&&t.streaming)await offscreen({type:'frame',tabId,data});t.nextVideo=Date.now()+t.videoIdleDelay;
   }catch{/* An inactive/new tab can temporarily have no compositor surface. */}finally{t.frameBusy=false;}
+}
+function configureScreencast(tabId){
+  const t=targets.get(tabId);if(!t)return Promise.resolve();
+  const configure=async()=>{
+    if(targets.get(tabId)!==t||nativeTabs.has(tabId))return;
+    await command(tabId,'Page.stopScreencast');
+    if(t.streaming)await command(tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:Math.max(1,Math.round(30/(t.videoFPS||30)))});
+  };
+  return t.screencastTask=(t.screencastTask||Promise.resolve()).then(configure,configure);
 }
 async function videoState(tabId,active) {
   const t=targets.get(tabId);if(!t||t.streaming===active)return;
   t.streaming=active;
   if(nativeTabs.has(tabId)){await offscreen({type:'active-video',tabId,active});return;}
   if(active)try{
-    await command(tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:Math.max(1,Math.round(30/(t.videoFPS||30)))});
+    await configureScreencast(tabId);
     // A newly opened background tab may not have produced its first compositor frame yet.
     if(!t.frameBusy){t.frameBusy=true;try{const seed=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});if(t.streaming){t.lastShot=seed.data;await offscreen({type:'frame',tabId,data:seed.data});}}finally{t.frameBusy=false;}}
   }catch{t.streaming=false;}
-  else {await command(tabId,'Page.stopScreencast').catch(()=>{});await offscreen({type:'stop-video',tabId}).catch(()=>{});}
+  else {await configureScreencast(tabId).catch(()=>{});await offscreen({type:'stop-video',tabId}).catch(()=>{});}
 }
+let clipboardJobs=Promise.resolve();
 let operationChain = Promise.resolve();
 function schedule(task) { operationChain = operationChain.then(task).catch(error => console.warn('TabShare operation failed:',error.message)); }
 const boot = (async () => {
@@ -164,6 +174,7 @@ async function connect() {
  if(message.type==='peer')schedule(()=>peerJoined(message));
  if(message.type==='peer-left')schedule(()=>peerLeft(message));
  if(message.type==='signal')void offscreen(message).catch(()=>{});
+        if(message.type==='clipboard')void enqueueInput({sessionId:message.sessionId,input:{...message.image,action:'pasteImage'}});
         if (message.type === 'input') {
           // Commands from all viewers execute in the same order on this browser.
           void enqueueInput(message);
@@ -184,6 +195,7 @@ async function connect() {
   })().finally(() => { connecting = null; });
   return connecting;
 }
+function contextChanged(error){return /Cannot find context|Execution context was destroyed|Inspected target navigated|No frame with given id|Frame with the given id|共享页面正在切换/i.test(error?.message||'');}
 async function command(tabId, method, params = {}) { return chrome.debugger.sendCommand({tabId}, method, params); }
 async function world(tabId) {
   const target = targets.get(tabId);
@@ -200,6 +212,7 @@ async function world(tabId) {
   const contextId=target.contextId;
   await evaluate(tabId, installDOM,contextId);
   await evaluate(tabId, 'globalThis.__tabShareDOM.reset()',contextId);
+  if(target.nativeViewport)await evaluate(tabId,'globalThis.__tabShareDOM.ownerViewport('+JSON.stringify(target.nativeViewport)+')',contextId);
   await evaluate(tabId, 'globalThis.__tabShareDOM.setMode('+JSON.stringify(target.mode||'dom')+')',contextId);
   valid();
   target.resources?.dispose();
@@ -210,12 +223,12 @@ async function world(tabId) {
   })().catch(error=>{if((target.contextEpoch||0)===epoch){target.contextId=null;target.resources?.dispose();target.resources=null;}throw error;}).finally(()=>{if(target.worldTask===task)target.worldTask=null;});
   target.worldTask=task;return task;
 }
-function invalidateWorld(target){target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;}
+function invalidateWorld(target){target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;target.navigation=null;target.historyURL=null;target.documentReady=false;}
 async function evaluate(tabId, expression,expectedContext) {
   const target = targets.get(tabId);
   const contextId=expectedContext??target?.contextId;
   if(!Number.isInteger(contextId)||contextId<=0||target?.contextId!==contextId)throw new Error('共享页面正在切换，请稍后重试');
-  const result = await command(tabId, 'Runtime.evaluate', {expression, contextId, returnByValue: true, userGesture: true, timeout:2000});
+  let result;try{result=await command(tabId, 'Runtime.evaluate', {expression, contextId, returnByValue: true, awaitPromise:true, userGesture: true, timeout:2000});}catch(error){if(contextChanged(error)&&target.contextId===contextId){invalidateWorld(target);target.pending=null;target.nextSend=0;}throw error;}
   if(targets.get(tabId)!==target||target.contextId!==contextId)throw new Error('共享页面正在切换，请稍后重试');
   if (result.exceptionDetails) throw new Error(result.result?.description || result.exceptionDetails.text);
   return result.result.value;
@@ -252,22 +265,36 @@ async function snapshot(tabId) {
   let contextId,capturingDOM=false;
   try {
     contextId=await world(tabId);capturingDOM=true;
-    const delta = target.pending || await evaluate(tabId, target.mode==='raster'||target.captureLimited? 'globalThis.__tabShareDOM.capture(true)':captureDOM,contextId);
+    const delta = target.pending || await evaluate(tabId, captureDOM,contextId);
     capturingDOM=false;
     if (!delta) return;
+    if(delta.meta?.url){
+      if(target.historyDirty||target.historyURL!==delta.meta.url||!target.navigation){
+        const history=await command(tabId,'Page.getNavigationHistory'),entry=history.entries?.[history.currentIndex];
+        if(contextId!==target.contextId)return;
+        target.navigation=entry?{entryId:entry.id,entries:history.entries.slice(Math.max(0,history.currentIndex-1000),history.currentIndex+1001).map(e=>e.id)}:null;target.historyURL=entry?.url||delta.meta.url;
+        if(entry?.url)delta.meta.url=entry.url;target.historyDirty=false;
+      }
+      delta.meta.navigation=target.navigation;
+    }
     target.captureLimited=!!delta.meta?.truncated;
     if(delta.meta?.mode!==target.mode)await rememberMode(target,delta.meta.mode);
     const requests=delta.resources;delete delta.resources;
-    if(!target.pending)target.document.apply(delta);
+    if(!target.pending){target.document.apply(delta);target.documentReady=true;}
     if(requests?.length)void target.resources.transfer(requests,target.sessions,resourceConfig());
     let sent = true;
     for (const id of target.sessions) sent = publish({type:'dom', sessionId:id, document:delta}) && sent;
     if (!sent) { target.pending = delta; return; }
     target.pending = null;
+    const wasBuilding=delta.reset||target.building;
+    const building=wasBuilding&&delta.meta?.pending;target.building=building;
     // Coalesce mutations while paying down a byte budget. Initial state is sent only once.
     const bytes = new TextEncoder().encode(JSON.stringify(delta)).byteLength;
-    target.nextSend = Date.now() + Math.max(target.videoFPS===2?1000:200, delta.reset ? 200 : bytes / 131072 * 1000);
+    target.byteDelayUntil=Date.now()+bytes/131072*1000;
+    target.nextSend = Date.now() + (wasBuilding?(building?50:200):Math.max(target.videoFPS===2?1000:200,bytes/131072*1000));
+    if(building){clearTimeout(target.progressTimer);target.progressTimer=setTimeout(()=>void snapshot(tabId),55);}
   } catch (error) {
+    if(contextChanged(error)){if(target.contextId===contextId)invalidateWorld(target);target.pending=null;target.nextSend=0;return;}
     if(capturingDOM&&contextId===target.contextId&&/Execution was terminated|timed out/i.test(error.message)){
       try{await evaluate(tabId,'globalThis.__tabShareDOM.limit()',contextId);target.captureLimited=true;target.pending=null;target.nextSend=0;return;}catch{}
     }
@@ -291,13 +318,14 @@ async function raster(tabId) {
     if(target.videoGeometry!==geometry){target.videoGeometry=geometry;for(const id of target.sessions)publish({type:'video',sessionId:id,info});}
     if(direct&&! [...target.sessions].some(id=>roomPeers(id).some(p=>!p.direct))){target.nextRaster=Date.now()+200;return;}
     let bytes=0;
-    const regions=info.full?[{id:'',width:info.width,height:info.height}]:info.regions;
-    for(const region of regions){
-      const options={format:'jpeg',quality:65,fromSurface:true,captureBeyondViewport:false};
-      if(!info.full)options.clip={x:region.x,y:region.y,width:region.width,height:region.height,scale:1};
-      const shot=await rasterFrame(params=>command(tabId,'Page.captureScreenshot',params),options);
-      bytes+=shot.data.length;
-      for(const id of target.sessions)transmit({type:'raster',sessionId:id,nodeId:region.id,full:info.full,data:shot.data,width:region.width,height:region.height});
+    if(info.regions.length){
+      // Clipped Page.captureScreenshot calls can leave stale surfaces in background tabs.
+      // Capture once locally, then crop before any image bytes leave the browser.
+      const shot=await rasterFrame(params=>command(tabId,'Page.captureScreenshot',params),{format:'jpeg',fromSurface:true,captureBeyondViewport:false});
+      const images=await evaluate(tabId,'globalThis.__tabShareDOM.cropFrame('+JSON.stringify(shot.data)+','+JSON.stringify(info)+')');
+      for(const image of images){const region=info.regions.find(r=>r.id===image.id);if(!region)continue;bytes+=image.data.length;
+        for(const id of target.sessions)transmit({type:'raster',sessionId:id,nodeId:region.id,full:false,data:image.data,width:region.width,height:region.height,region:{offsetX:region.offsetX,offsetY:region.offsetY,styleWidth:region.styleWidth,styleHeight:region.styleHeight,cuts:region.cuts}});
+      }
     }
     // Only disconnected WebRTC peers use this bounded emergency screenshot transport.
     target.nextRaster=Date.now()+Math.max(500,bytes/65536*1000);
@@ -305,11 +333,12 @@ async function raster(tabId) {
 }
 async function resizeViewport(tabId,viewport) {
   const target=targets.get(tabId);if(!target)return;
+  if(viewport&&!target.nativeViewport){const metrics=await command(tabId,'Page.getLayoutMetrics');const native=metrics.cssLayoutViewport||metrics.layoutViewport;target.nativeViewport={width:native.clientWidth,height:native.clientHeight};}
   if(viewport)await command(tabId,'Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.deviceScaleFactor,mobile:false,screenWidth:viewport.width,screenHeight:viewport.height,screenOrientation:{type:viewport.width>viewport.height?'landscapePrimary':'portraitPrimary',angle:viewport.width>viewport.height?90:0}});
   else if(target.viewport)await command(tabId,'Emulation.clearDeviceMetricsOverride');
   target.viewport=viewport;
   for(const id of target.sessions)transmit({type:'viewport',sessionId:id,viewport});
-  await world(tabId);await evaluate(tabId,'globalThis.__tabShareDOM.invalidate()');
+  await world(tabId);if(target.nativeViewport)await evaluate(tabId,'globalThis.__tabShareDOM.ownerViewport('+JSON.stringify(target.nativeViewport)+')');await evaluate(tabId,'globalThis.__tabShareDOM.invalidate()');
   target.pending=null;target.nextSend=0;target.nextRaster=0;await snapshot(tabId);
 }
 async function resync(sessionId) {
@@ -324,8 +353,8 @@ async function resync(sessionId) {
 async function targetFor(tab,mode='dom') {
   let target=targets.get(tab.id);if(target)return target;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
-  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode,document:new DocumentState()};targets.set(tab.id,target);
-  try{await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});}
+  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
+  try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
   target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
 }
@@ -359,7 +388,7 @@ async function openSession(session) {
       status(session.id, 'connected', '', tab);
       if(alreadyRunning&&target.contextId){await evaluate(tab.id,'globalThis.__tabShareDOM.reset()');target.nextSend=0;const requests=[...target.resources.done].filter(([,item])=>item.bytes).map(([id])=>({id}));void target.resources.transfer(requests,target.sessions,resourceConfig());}
       await snapshot(tab.id);
-    } catch (error) { status(session.id, 'error', error.message); }
+    } catch (error) {if(!contextChanged(error))status(session.id,'error',error.message);}
   })().finally(() => opening.delete(session.id));
   opening.set(session.id, job);
   return job;
@@ -372,13 +401,14 @@ async function pause(sessionId) {
   if (!target) return;
   target.sessions.delete(sessionId);
   if (target.sessions.size) return;
-  target.inputs?.clear();clearInterval(target.timer);
+  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.inputSnapshot);clearTimeout(target.styleRefresh);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   await videoState(binding.tabId,false);nativeTabs.delete(binding.tabId);await offscreen({type:'stop-video',tabId:binding.tabId}).catch(()=>{});
   target.resources?.dispose();
   if(target.viewport)try{await command(binding.tabId,'Emulation.clearDeviceMetricsOverride');}catch{}
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
   targets.delete(binding.tabId);
+  await command(binding.tabId,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
   try { await chrome.debugger.detach({tabId: binding.tabId}); } catch { /* Already closed/detached. */ }
 }
 async function pauseAll() { for (const id of [...bindings.keys()]) await pause(id); }
@@ -388,23 +418,36 @@ async function control(message) {
   let input = message.input;
   const {action} = input;
   const target=targets.get(binding.tabId);
+  if(input.version&&(!target.documentReady||input.version!==target.document.version))return;
+  if(action==='pasteImage'){const paste=async()=>{
+    if(!['image/png','image/jpeg','image/webp','image/gif'].includes(input.mime)||typeof input.data!=='string'||input.data.length>Math.ceil(4*1024*1024/3)*4||!/^[-A-Za-z0-9+/=]+$/.test(input.data))return;
+    await world(binding.tabId);
+    const focus=await evaluate(binding.tabId,'globalThis.__tabShareDOM.act('+JSON.stringify({...input,action:'focus',data:undefined})+')');if(focus?.stale)return;
+    let native=await offscreen({type:'clipboard-image',data:input.data,mime:input.mime});
+    if(!native)native=await evaluate(binding.tabId,'globalThis.__tabShareDOM.writeClipboardImage('+JSON.stringify({data:input.data,mime:input.mime})+')');
+    if(native){for(const action of ['keyDown','keyUp']){const [method,params]=cdpInput({action,key:'v',code:'KeyV',keyCode:86,modifiers:focus?.mac?4:2});await command(binding.tabId,method,params);}}
+    if(!native){const result=await evaluate(binding.tabId,'globalThis.__tabShareDOM.act('+JSON.stringify(input)+')');if(!result?.accepted)publish({type:'notice',sessionId:message.sessionId,detail:'当前控件未接收图片；该网站可能要求原生剪贴板授权。'});}
+    target.nextSend=0;await snapshot(binding.tabId);
+  };const job=clipboardJobs.then(paste,paste);clipboardJobs=job.catch(()=>{});return job;
+  }
   if(action==='viewport'){await resizeViewport(binding.tabId,{width:input.width,height:input.height,deviceScaleFactor:input.deviceScaleFactor,owner:input.viewerId});return;}
   if(action==='restoreViewport'||action==='viewportRelease'){if(action==='viewportRelease'&&target.viewport?.owner!==input.viewerId)return;await resizeViewport(binding.tabId,null);return;}
   if(action==='closePopup'){if(binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
   if(action==='dialog'){if(target?.dialog?.id!==input.dialogId)return;await command(binding.tabId,'Page.handleJavaScriptDialog',{accept:!!input.accept,promptText:input.text||''});return;}
-  if(action==='mode'){await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
+  if(action==='mode'){if(input.mode!=='dom')return;await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
   if (input.nodeId) {
     await world(binding.tabId);
     const point = await evaluate(binding.tabId, 'globalThis.__tabShareDOM.act(' + JSON.stringify(input) + ')');
+    if(point?.stale){target.nextSend=0;return;}
     if(action==='select'){if(point?.key){for(const key of [point,{key:'Enter',code:'Enter',keyCode:13}])for(const action of ['keyDown','keyUp']){const [method,params]=cdpInput({action,...key});await command(binding.tabId,method,params);}await evaluate(binding.tabId,'globalThis.__tabShareDOM.act('+JSON.stringify({...input,action:'selectFinish'})+')');}return;}
     if (action === 'scroll' || action === 'selection') return;
     input = {...input, ...point};
   }
-  if (action === 'back' || action === 'forward') {
+  if (action === 'back' || action === 'forward' || action==='history') {
     const history = await command(binding.tabId, 'Page.getNavigationHistory');
-    const entry = history.entries[history.currentIndex + (action === 'back' ? -1 : 1)];
+    const entry = action==='history'?history.entries.find(e=>e.id===input.entryId):history.entries[history.currentIndex + (action === 'back' ? -1 : 1)];
     if (entry) await command(binding.tabId, 'Page.navigateToHistoryEntry', {entryId: entry.id});
-  } else { const [method, params] = cdpInput(input); await command(binding.tabId, method, params); }
+  } else { const pointer=action.startsWith('mouse');if(pointer){await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.ownerInput(true)');}try{const [method,params]=cdpInput(input);await command(binding.tabId,method,params);}finally{if(pointer)await evaluate(binding.tabId,'globalThis.__tabShareDOM.ownerInput(false)').catch(()=>{});} }
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
@@ -415,18 +458,21 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     target.frameBusy=true;target.lastFrame=Date.now();
     void offscreen({type:'frame',tabId:source.tabId,data:params.data}).catch(()=>{}).finally(()=>{target.frameBusy=false;void ack();});
   }
+  if(method==='Runtime.executionContextsCleared'||method==='Runtime.executionContextDestroyed'&&params.executionContextId===target.contextId){invalidateWorld(target);target.pending=null;target.nextSend=0;return;}
   target.resources?.event(method,params);
+  if(method==='CSS.styleSheetChanged'){clearTimeout(target.styleRefresh);target.styleRefresh=setTimeout(()=>void world(source.tabId).then(()=>evaluate(source.tabId,'globalThis.__tabShareDOM.invalidate()')).catch(()=>{}),100);}
+  if(method==='Page.navigatedWithinDocument'){target.historyDirty=true;target.nextSend=0;void world(source.tabId).then(()=>evaluate(source.tabId,'globalThis.__tabShareDOM.invalidate()')).catch(()=>{});}
   if(method==='DOM.shadowRootPushed'&&params.root.shadowRootType==='closed')void shadows(source.tabId).catch(()=>{});
   if(method==='Page.javascriptDialogOpening'){target.dialog={id:crypto.randomUUID(),kind:params.type,message:params.message.slice(0,8192),default:(params.defaultPrompt||'').slice(0,8192)};for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:target.dialog});}
   if(method==='Page.javascriptDialogClosed'){target.dialog=null;for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:null});}
   if (target && method === 'Page.frameNavigated' && !params.frame.parentId) {
-    invalidateWorld(target);target.pending = null; target.nextSend = 0;
+    invalidateWorld(target);target.historyDirty=true;target.pending = null; target.nextSend = 0;
   }
 });
 function detached(tabId, reason) {
   const target = targets.get(tabId);
   if (!target) return;
-  target.inputs?.clear();clearInterval(target.timer);
+  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.inputSnapshot);clearTimeout(target.styleRefresh);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   target.resources?.dispose();nativeTabs.delete(tabId);void offscreen({type:'stop-video',tabId}).catch(()=>{});targets.delete(tabId);
   for (const id of target.sessions) {
@@ -458,10 +504,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if(message.type==='signal'){const p=peers.get(message.sessionId+':'+message.viewerId);if(p){if(message.signal?.description?.type==='offer')p.attempt=message.signal.attempt;transmit(message);}}
     if(message.type==='peer-state')schedule(()=>peerState(message));
     if(message.type==='peer-input')peerInput(message);
+    if(message.type==='peer-clipboard'){const p=peers.get(message.sessionId+':'+message.viewerId),image=message.image;if(p&&p.attempt===message.attempt&&image&&Date.now()-(p.lastClipboard||0)>1000&&typeof image.nodeId==='string'&&image.nodeId.length<=32&&typeof image.version==='string'&&image.version.length<=80){p.lastClipboard=Date.now();void enqueueInput({sessionId:message.sessionId,input:{...image,action:'pasteImage',viewerId:message.viewerId}});}}
     if(message.type==='video-budget'){
       const t=targets.get(message.tabId),fps=message.fps===2?2:30;
-      if(t&&t.videoFPS!==fps){t.videoFPS=fps;t.nextVideo=0;t.nextSend=0;
-        if(t.streaming&&!nativeTabs.has(message.tabId))void command(message.tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:Math.round(30/fps)}).catch(()=>{});
+      if(t&&t.videoFPS!==fps){void command(message.tabId,'Emulation.setFocusEmulationEnabled',{enabled:fps>2}).catch(()=>{});t.videoFPS=fps;t.nextVideo=0;t.nextSend=0;
+        if(t.streaming&&!nativeTabs.has(message.tabId))void configureScreencast(message.tabId).catch(()=>{});
       }
     }
     if(message.type==='native-ended'){nativeTabs.delete(message.tabId);const t=targets.get(message.tabId);if(t){t.streaming=false;t.nextRaster=0;}}

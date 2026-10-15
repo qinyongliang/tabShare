@@ -41,35 +41,52 @@ type Session struct {
 	TabEpoch string `json:"tabEpoch,omitempty"`
 	Title    string `json:"title"`
 }
+type RasterCut struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+type RasterRegion struct {
+	StyleWidth  float64     `json:"styleWidth,omitempty"`
+	StyleHeight float64     `json:"styleHeight,omitempty"`
+	OffsetX     float64     `json:"offsetX"`
+	OffsetY     float64     `json:"offsetY"`
+	Cuts        []RasterCut `json:"cuts,omitempty"`
+}
 type Message struct {
-	Type       string      `json:"type"`
-	Signal     *Signal     `json:"signal,omitempty"`
-	ICEServers []ICEServer `json:"iceServers,omitempty"`
-	ViewerID   string      `json:"viewerId,omitempty"`
-	Viewport   *Viewport   `json:"viewport,omitempty"`
-	Asset      *AssetMeta  `json:"asset,omitempty"`
-	Assets     []AssetMeta `json:"assets,omitempty"`
-	Mode       string      `json:"mode,omitempty"`
-	Dialog     *Dialog     `json:"dialog,omitempty"`
-	SessionID  string      `json:"sessionId,omitempty"`
-	Token      string      `json:"token,omitempty"`
-	AgentID    string      `json:"agentId,omitempty"`
-	Key        string      `json:"key,omitempty"`
-	Session    *Session    `json:"session,omitempty"`
-	Data       string      `json:"data,omitempty"`
-	Width      float64     `json:"width,omitempty"`
-	Height     float64     `json:"height,omitempty"`
-	Status     string      `json:"status,omitempty"`
-	Detail     string      `json:"detail,omitempty"`
-	URL        string      `json:"url,omitempty"`
-	Title      string      `json:"title,omitempty"`
-	Viewers    int         `json:"viewers,omitempty"`
-	Input      *Input      `json:"input,omitempty"`
-	Document   *Document   `json:"document,omitempty"`
-	NodeID     string      `json:"nodeId,omitempty"`
-	Full       bool        `json:"full,omitempty"`
+	Image      *ClipboardImage `json:"image,omitempty"`
+	Region     *RasterRegion   `json:"region,omitempty"`
+	Type       string          `json:"type"`
+	Signal     *Signal         `json:"signal,omitempty"`
+	ICEServers []ICEServer     `json:"iceServers,omitempty"`
+	ViewerID   string          `json:"viewerId,omitempty"`
+	Viewport   *Viewport       `json:"viewport,omitempty"`
+	Asset      *AssetMeta      `json:"asset,omitempty"`
+	Assets     []AssetMeta     `json:"assets,omitempty"`
+	Mode       string          `json:"mode,omitempty"`
+	Dialog     *Dialog         `json:"dialog,omitempty"`
+	SessionID  string          `json:"sessionId,omitempty"`
+	Token      string          `json:"token,omitempty"`
+	AgentID    string          `json:"agentId,omitempty"`
+	Key        string          `json:"key,omitempty"`
+	Session    *Session        `json:"session,omitempty"`
+	Data       string          `json:"data,omitempty"`
+	Width      float64         `json:"width,omitempty"`
+	Height     float64         `json:"height,omitempty"`
+	Status     string          `json:"status,omitempty"`
+	Detail     string          `json:"detail,omitempty"`
+	URL        string          `json:"url,omitempty"`
+	Title      string          `json:"title,omitempty"`
+	Viewers    int             `json:"viewers,omitempty"`
+	Input      *Input          `json:"input,omitempty"`
+	Document   *Document       `json:"document,omitempty"`
+	NodeID     string          `json:"nodeId,omitempty"`
+	Full       bool            `json:"full,omitempty"`
 }
 type Input struct {
+	Version           string     `json:"version,omitempty"`
+	EntryID           int        `json:"entryId,omitempty"`
 	Action            string     `json:"action"`
 	ViewerID          string     `json:"viewerId,omitempty"`
 	Width             int        `json:"width,omitempty"`
@@ -118,17 +135,18 @@ type Dialog struct {
 	Default string `json:"default,omitempty"`
 }
 type peer struct {
-	id           string
-	direct       bool
-	lastRTCRetry time.Time
-	conn         *websocket.Conn
-	queue        chan []byte
-	queueMu      sync.Mutex
-	queueBytes   int
-	closed       bool
-	ctx          context.Context
-	owner        *Server
-	cancel       context.CancelFunc
+	id            string
+	direct        bool
+	lastRTCRetry  time.Time
+	lastClipboard time.Time
+	conn          *websocket.Conn
+	queue         chan []byte
+	queueMu       sync.Mutex
+	queueBytes    int
+	closed        bool
+	ctx           context.Context
+	owner         *Server
+	cancel        context.CancelFunc
 }
 type live struct {
 	viewers       map[*peer]bool
@@ -249,6 +267,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.remove)
 	mux.HandleFunc("OPTIONS /api/sessions/{id}", s.api)
 	mux.HandleFunc("/api/resources/{id}/{asset}", s.resource)
+	mux.HandleFunc("POST /api/clipboard/{id}", s.clipboard)
 	mux.HandleFunc("GET /ws/agent", s.agentWS)
 	mux.HandleFunc("GET /ws/view/{id}", s.viewerWS)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -449,7 +468,7 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request, agent bool) (*we
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionNoContextTakeover, CompressionThreshold: 4096})
 	if err == nil {
 		if agent {
-			c.SetReadLimit(4 << 20)
+			c.SetReadLimit(8 << 20)
 		} else {
 			c.SetReadLimit(131072)
 		}
@@ -676,8 +695,8 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.clearAssets(s.live[se.ID])
 			}
 		case "raster":
-			if m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
-				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Full: m.Full})
+			if !m.Full && (m.Region == nil || len(m.Region.Cuts) <= 32) && m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
+				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Region: m.Region, Full: false})
 			}
 		case "viewport":
 			if m.Viewport == nil || (validViewport(m.Viewport.Width, m.Viewport.Height, m.Viewport.DeviceScaleFactor) && identifier.MatchString(m.Viewport.Owner)) {
@@ -685,11 +704,15 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.broadcast(se.ID, Message{Type: "viewport", Viewport: m.Viewport})
 			}
 		case "mode":
-			if m.Mode == "dom" || m.Mode == "raster" {
+			if m.Mode == "dom" {
 				s.live[se.ID].mode = m.Mode
 			}
-			s.live[se.ID].full = m.Full
-			s.broadcast(se.ID, Message{Type: "mode", Full: m.Full, Mode: s.live[se.ID].mode})
+			s.live[se.ID].full = false
+			s.broadcast(se.ID, Message{Type: "mode", Full: false, Mode: s.live[se.ID].mode})
+		case "notice":
+			if len(m.Detail) <= 8192 {
+				s.broadcast(se.ID, Message{Type: "notice", Detail: m.Detail})
+			}
 		case "dialog":
 			if m.Dialog == nil || (identifier.MatchString(m.Dialog.ID) && len(m.Dialog.Message) <= 8192 && len(m.Dialog.Default) <= 8192) {
 				s.live[se.ID].dialog = m.Dialog
@@ -880,7 +903,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func validInput(i *Input) bool {
-	if i == nil || i.Modifiers < 0 || i.Modifiers > 15 || len(i.Text) > 8192 || len(i.Key) > 64 || len(i.Code) > 64 || len(i.NodeID) > 32 {
+	if i == nil || len(i.Version) > 80 || i.Modifiers < 0 || i.Modifiers > 15 || len(i.Text) > 8192 || len(i.Key) > 64 || len(i.Code) > 64 || len(i.NodeID) > 32 {
 		return false
 	}
 	if i.Selection != nil {
@@ -911,7 +934,7 @@ func validInput(i *Input) bool {
 		}
 		return i.NodeID != "" && n <= 8192
 	case "mode":
-		return i.Mode == "dom" || i.Mode == "raster"
+		return i.Mode == "dom"
 	case "selection":
 		return i.NodeID != "" && i.Selection != nil
 	case "dialog":
@@ -922,6 +945,8 @@ func validInput(i *Input) bool {
 		return validViewport(i.Width, i.Height, i.DeviceScaleFactor)
 	case "restoreViewport":
 		return true
+	case "history":
+		return i.EntryID > 0 && i.EntryID <= 2147483647
 	case "navigate":
 		_, err := canonical(i.URL)
 		return err == nil && len(i.URL) <= 8192

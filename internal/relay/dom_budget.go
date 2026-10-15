@@ -9,7 +9,7 @@ func (s *Server) clearDocument(l *live) {
 
 func (s *Server) applyDocument(l *live, d *Document) error {
 	before := l.document.retainedBytes()
-	budget := min(4<<20, s.cfg.DOMCacheBytes-s.domBytes+before)
+	budget := min(6<<20, s.cfg.DOMCacheBytes-s.domBytes+before)
 	if err := l.document.applyBudget(d, budget); err != nil {
 		return err
 	}

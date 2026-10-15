@@ -6,6 +6,7 @@ import path from 'node:path';
 
 const exec=promisify(execFile),sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const sites={
+ google:{url:'https://www.google.com/search?q=VIVANT&hl=zh-CN',title:'VIVANT',next:'https://www.google.com/search?q=VIVANT+season+2&hl=zh-CN'},
  github:{url:'https://github.com/microsoft/TypeScript/issues',title:'TypeScript',input:'#issues-index-filter-input',query:'is:issue is:open browser',next:'https://github.com/microsoft/TypeScript'},
  go:{url:'https://go.dev/doc/',title:'Documentation',expectDOM:true,next:'https://go.dev/doc/faq'},
  youtube:{url:'https://www.youtube.com/',title:'YouTube',input:'input[name="search_query"]',query:'Chromium browser'},
@@ -77,8 +78,11 @@ export async function runRealSites({root,request,view,cdp,chrome,getTabs,session
          const text=await Promise.all([one,two].map(p=>p.frameLocator('#mirror').locator('body').innerText()));return text.every(t=>t.includes(site.title));
        },'real content in DOM or decoded website video');
        entry.render=await full()?'whole-page-video':'dom';entry.initialDOMTruncated=!!packets.at(-1)?.document.meta?.truncated;
-       if(site.expectDOM)assert.equal(entry.render,'dom','This page must retain native DOM rendering');
+       assert.equal(entry.render,'dom','Every website must retain native DOM rendering');
+       assert.ok(!videoGeometries.slice(geometryStart).some(i=>i.full),'Only regional video is allowed');
      });
+     await until(()=>one.locator('#surface').getAttribute('data-syncing').then(v=>v==='false'),'initial progressive DOM complete',45000);
+     entry.mirror=await one.frameLocator('#mirror').locator('body').evaluate(n=>({margin:getComputedStyle(n).margin,style:n.getAttribute('style'),id:n.dataset.nodeId,css:n.ownerDocument.getElementById('ts-page-css')?.textContent.slice(0,600),rules:n.ownerDocument.getElementById('ts-page-css')?.sheet?.cssRules.length}));
      await screenshots('initial');
      if(site.input){
        await check('remote typing changes real source field',async()=>{
@@ -106,11 +110,11 @@ export async function runRealSites({root,request,view,cdp,chrome,getTabs,session
        await until(()=>two.locator('#address').inputValue().then(url=>url==='https://go.dev/doc/install'),'second visitor follows native link');
      });
      if(site.next)await check('remote address navigation reaches real next page',async()=>{
-       await one.locator('#address').fill(site.next);await one.locator('#address').press('Enter');await until(()=>evaluate('location.origin+location.pathname').then(url=>url===site.next),'source navigated');
+       await one.locator('#share-settings-toggle').click();await one.locator('#address').fill(site.next);await one.locator('#address').press('Enter');await one.locator('#share-settings-toggle').click();await until(()=>evaluate('location.origin+location.pathname').then(url=>url===site.next),'source navigated');
        await until(()=>two.locator('#address').inputValue().then(url=>url.startsWith(site.next)),'second visitor follows navigation');
      });
      if(name==='youtube')await check('real YouTube watch page and playback control',async()=>{
-       await one.locator('#address').fill('https://www.youtube.com/watch?v=jNQXAC9IVRw');await one.locator('#address').press('Enter');
+       await one.locator('#share-settings-toggle').click();await one.locator('#address').fill('https://www.youtube.com/watch?v=jNQXAC9IVRw');await one.locator('#address').press('Enter');await one.locator('#share-settings-toggle').click();
        await until(()=>evaluate('(()=>{const v=document.querySelector("video");return v?.readyState>=2&&v.duration>=15&&v.duration<=30&&!document.querySelector("#movie_player")?.classList.contains("ad-showing");})()'),'YouTube public clip loaded without an ad',45000);
        if(!await evaluate('document.querySelector("video").paused')){await click('.ytp-play-button');await until(()=>evaluate('document.querySelector("video").paused'),'remote pause before playback');}
        await click('.ytp-play-button');await until(()=>evaluate('!document.querySelector("video").paused&&!document.querySelector("video").ended'),'remote starts playback');
@@ -124,6 +128,8 @@ export async function runRealSites({root,request,view,cdp,chrome,getTabs,session
        const sum=(type,key,predicate=()=>true)=>all.filter(s=>s.type===type&&predicate(s)).reduce((n,s)=>n+(s[key]||0),0);
        return {receivedICEBytes:sum('candidate-pair','bytesReceived',s=>s.nominated&&s.state==='succeeded'),receivedVideoBytes:sum('inbound-rtp','bytesReceived',s=>s.kind==='video'),receivedDataBytes:sum('data-channel','bytesReceived'),decodedFrames:sum('inbound-rtp','framesDecoded',s=>s.kind==='video')};
      });
+     await until(()=>one.locator('#surface').getAttribute('data-syncing').then(v=>v==='false'),'navigation DOM settled before traffic sample',60000);
+     await until(()=>evaluate("document.readyState==='complete'&&document.fonts.status==='loaded'"),'website resources settled',45000);
      const batchStart=packets.length,before=await Promise.all([one,two].map(rtcStats)),idleStart=Date.now();await sleep(5000);
      const after=await Promise.all([one,two].map(rtcStats)),batches=packets.slice(batchStart);
      entry.fiveSecondTraffic={elapsedMs:Date.now()-idleStart,batches:batches.length,rawDOMBytes:batches.reduce((n,p)=>n+p.bytes,0),resets:batches.filter(p=>p.document.reset).length,visitors:after.map((s,i)=>Object.fromEntries(Object.entries(s).map(([k,v])=>[k,v-before[i][k]])))};

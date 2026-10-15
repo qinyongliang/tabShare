@@ -20,6 +20,12 @@ export class ResourceBridge {
     const raw=atob(body.content??body.body),bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);return bytes;
   }
   async read(url) {
+    if(/^data:image\/(png|jpeg|gif|webp|avif|svg\+xml)[;,]/i.test(url)){
+      if(url.length>12*1024*1024)throw new Error('Resource budget exceeded');
+      const response=await fetch(url),bytes=new Uint8Array(await response.arrayBuffer());if(bytes.length>8*1024*1024)throw new Error('Resource budget exceeded');
+      let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));
+      return {content:btoa(raw),base64Encoded:true,mime:response.headers.get('Content-Type')?.split(';')[0]};
+    }
     const resource=this.loaded.get(url),response=this.responses.get(url);
     if(!resource&&!response)throw new Error('Resource was not loaded by this tab');
     if(resource)try{return await this.command('Page.getResourceContent',{frameId:resource.frameId,url});}catch{}
@@ -65,7 +71,7 @@ export class ResourceBridge {
           const body=await this.read(request.url),bytes=this.bytes(body);
           if(this.disposed||generation!==this.generation)return;
           if(!bytes.length||bytes.length>8*1024*1024||this.bytesRetained+bytes.length>32*1024*1024)throw new Error('Resource budget exceeded');
-          let mime=this.loaded.get(request.url)?.mime||this.responses.get(request.url)?.mime;
+          let mime=this.loaded.get(request.url)?.mime||this.responses.get(request.url)?.mime||body.mime;
           if(request.kind==='font'){const magic=new TextDecoder().decode(bytes.subarray(0,4));mime=magic==='wOF2'?'font/woff2':magic==='wOFF'?'font/woff':magic==='OTTO'?'font/otf':'font/ttf';}
           item={bytes,mime,sent:new Set()};this.bytesRetained+=bytes.length;this.done.set(request.id,item);
         }

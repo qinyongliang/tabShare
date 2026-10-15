@@ -38,7 +38,8 @@ export class Resources {
           const doc=new DOMParser().parseFromString(new TextDecoder().decode(bytes),'image/svg+xml');
           if(doc.querySelector('parsererror'))return;
           doc.querySelectorAll('script,foreignObject,iframe,object,embed').forEach(n=>n.remove());
-          for(const node of doc.querySelectorAll('*'))for(const attr of [...node.attributes])if(/^on/i.test(attr.name)||/(href|src)$/i.test(attr.name)&&!attr.value.startsWith('#')||/url\(\s*["']?(?!#)/i.test(attr.value))node.removeAttribute(attr.name);
+          const externalURL=value=>{let external=false;value.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi,(_,a,b,c)=>{if(!(a??b??c).startsWith('#'))external=true;return '';});return external;};
+          for(const node of doc.querySelectorAll('*'))for(const attr of [...node.attributes])if(/^on/i.test(attr.name)||/(href|src)$/i.test(attr.name)&&!attr.value.startsWith('#')||externalURL(attr.value))node.removeAttribute(attr.name);
           data=new XMLSerializer().serializeToString(doc);
         }
         url=URL.createObjectURL(new Blob([data],{type:meta.mime}));this.hashes.set(hash,url);this.sizes.set(hash,meta.size);this.bytes+=meta.size;

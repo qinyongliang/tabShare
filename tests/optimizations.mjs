@@ -12,6 +12,10 @@ const server=http.createServer(async(req,res)=>{
  if(['/extension/video-capture.js','/extension/video-layout.js'].includes(req.url)){res.setHeader('Content-Type','text/javascript');res.end(await readFile(new URL('..'+req.url,import.meta.url)));return;}
  hits.push(req.url);
  if(req.url==='/font.ttf'){res.setHeader('Content-Type','font/ttf');res.end(font);return;}
+ if(req.url==='/icons'){res.setHeader('Content-Type','text/html');res.end(await readFile(new URL('./fixtures/icons.html',import.meta.url)));return;}
+ if(req.url==='/icon.svg'){res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M10 0L20 20H0Z"/></svg>');return;}
+ if(req.url==='/sprite.svg'){res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="paint:star"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><symbol id="star" viewBox="0 0 20 20"><path fill="url(&quot;#paint:star&quot;)" d="M10 0L13 7H20L15 12L17 20L10 16L3 20L5 12L0 7H7Z"/></symbol></svg>');return;}
+ if(req.url==='/trusted'){res.setHeader('Content-Security-Policy',"require-trusted-types-for 'script'");res.setHeader('Content-Type','text/html');res.end('<!doctype html><body>Trusted Types page</body>');return;}
  if(['/image.png','/hidden.png'].includes(req.url)){res.setHeader('Content-Type','image/png');res.end(png);return;}
  res.setHeader('Content-Type','text/html; charset=utf-8');
  res.end('<!doctype html><html><head><style>@font-face{font-family:UsedFont;src:url("/font.ttf") format("truetype"),url("/unused-alternative.woff2") format("woff2")}@font-face{font-family:UnusedFont;src:url("/unused-font.woff2")}#font{font-family:UsedFont}#background{width:40px;height:40px;background-image:url("/image.png")}</style></head><body><div id="font">Loaded font</div><input id="field"><img id="photo" src="/image.png"><div id="background"></div>'+Array.from({length:200},(_,i)=>'<div><span>row '+i+'</span></div>').join('')+'</body></html>');
@@ -25,7 +29,8 @@ try{
  const columnPositions=await source.locator('#columns>div').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().x));
  await source.evaluate(installDOM);const cdp=await source.context().newCDPSession(source);
  const bridge=new ResourceBridge((m,p)=>cdp.send(m,p),expression=>source.evaluate(expression));await bridge.scan();
- const initial=await source.evaluate(()=>__tabShareDOM.capture());
+ const chunks=[];let chunk;do{chunk=await source.evaluate(()=>__tabShareDOM.capture());if(chunk)chunks.push(chunk);}while(chunk?.meta.pending);
+ const initial={...chunks[0],nodes:chunks.flatMap(c=>c.nodes),resources:chunks.flatMap(c=>c.resources||[]),meta:chunks.at(-1).meta};
  assert.equal(initial.meta.truncated,false);
  assert.ok(initial.resources.some(r=>r.url.endsWith('/font.ttf')),'used, loaded font is forwarded');
  assert.ok(initial.resources.every(r=>!r.url.includes('unused-')),'unused faces and alternative sources are not requested');
@@ -61,6 +66,29 @@ try{
  assert.ok(result.writes<=3,'resource arrival must not rewrite unrelated styles');assert.equal(result.intact,true);assert.ok(result.photo.startsWith('blob:'));assert.ok(result.background.includes('blob:'));assert.equal(result.pruned,true);
  assert.deepEqual(result.columnPositions,columnPositions,'multi-column content must keep the same horizontal positions');
  console.log('PASS: targeted resource refresh:',result.nodes,'nodes,',result.writes,'style writes,',result.ms.toFixed(2),'ms; local input preserved');
+ const cleanReset=await visitor.evaluate(initial=>{const mirror=new ReviewMirror(document);document.body.style.margin='8px';mirror.apply({...initial,reset:true,css:':where([data-node-id]){margin:0px}',nodes:[{id:initial.root,tag:'body',children:[],style:{},attrs:{}}]});return getComputedStyle(document.body).margin;},initial);
+ assert.equal(cleanReset,'0px','reset must remove old root styles before applying compact defaults');
+ const trusted=await browser.newPage();await trusted.goto('http://127.0.0.1:'+server.address().port+'/trusted');await trusted.evaluate(installDOM);
+ assert.ok(await trusted.locator('[data-tabshare-owner-ui]').count());await trusted.close();
+ console.log('PASS: compact root reset clears stale margins; owner UI initializes with Trusted Types enforcement');
+ const icons=await browser.newPage();await icons.goto('http://127.0.0.1:'+server.address().port+'/icons');await icons.evaluate(installDOM);
+ const iconCDP=await icons.context().newCDPSession(icons),iconBridge=new ResourceBridge((m,p)=>iconCDP.send(m,p),expression=>icons.evaluate(expression));await iconBridge.scan();
+ const iconChunks=[];do{chunk=await icons.evaluate(()=>__tabShareDOM.capture());if(chunk)iconChunks.push(chunk);}while(chunk?.meta.pending);
+ const iconAssets=[];await iconBridge.transfer(iconChunks.flatMap(c=>c.resources||[]),['test'],{deliver:async(session,id,item)=>{iconAssets.push({id,mime:item.mime,data:Buffer.from(item.bytes).toString('base64')});return false;}});
+ assert.ok(iconAssets.some(a=>a.mime==='image/svg+xml'),'loaded SVG masks and external symbols are forwarded');
+ assert.ok(!iconChunks.flatMap(c=>c.resources||[]).some(r=>r.url.endsWith('/icons#round')||r.url.endsWith('/icons#brand')),'local paint servers must not become network assets');
+ const iconMirror=await browser.newPage();await iconMirror.goto('http://127.0.0.1:'+server.address().port);await iconMirror.evaluate(mirrorSource);
+ await iconMirror.evaluate((await readFile(new URL('../web/resources.js',import.meta.url),'utf8')).replace('export class Resources','globalThis.ReviewResources=class Resources'));
+ await iconMirror.evaluate(async({chunks,assets})=>{const resources=new ReviewResources('test','test',()=>{});resources.keepVersion(chunks[0].version);for(const a of assets){const bytes=Uint8Array.from(atob(a.data),c=>c.charCodeAt(0)),sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');await resources.add({id:a.id,mime:a.mime,size:bytes.length,sha256},bytes);}const mirror=new ReviewMirror(document,resources);for(const c of chunks)mirror.apply(c);}, {chunks:iconChunks,assets:iconAssets});
+ await iconMirror.waitForTimeout(200);
+ for(const selector of ['#logo','#google','#github','#sprite','#external','#mask','#inline']){
+   const images=await Promise.all([icons,iconMirror].map(async p=>(await p.locator(selector).screenshot()).toString('base64')));
+   const diff=await iconMirror.evaluate(async images=>{const bitmaps=await Promise.all(images.map(async data=>createImageBitmap(await(await fetch('data:image/png;base64,'+data)).blob())));const pixels=bitmaps.map(b=>{const c=document.createElement('canvas');c.width=b.width;c.height=b.height;const x=c.getContext('2d');x.drawImage(b,0,0);return x.getImageData(0,0,c.width,c.height).data;});let changed=0;for(let i=0;i<pixels[0].length;i+=4)if([0,1,2].some(k=>Math.abs(pixels[0][i+k]-pixels[1][i+k])>12))changed++;return {sameSize:bitmaps[0].width===bitmaps[1].width&&bitmaps[0].height===bitmaps[1].height,ratio:changed/(pixels[0].length/4)};},images);
+   if(!diff.sameSize||diff.ratio>=.01)console.log('Icon diagnostic:',selector,await Promise.all([icons,iconMirror].map(p=>p.locator(selector).evaluate(n=>{const icon=n.querySelector('span');return {html:n.outerHTML,mask:icon&&getComputedStyle(icon).maskImage};}))),iconAssets.map(a=>({id:a.id,mime:a.mime,size:a.data.length})));
+   assert.ok(diff.sameSize&&diff.ratio<.01,selector+' icon geometry and pixels must match: '+JSON.stringify(diff));
+ }
+ iconBridge.dispose();await icons.close();await iconMirror.close();
+ console.log('PASS: native SVG logos, currentColor paths, gradients/clips, local/external symbols and CSS SVG masks retain source geometry and pixels');
  bridge.dispose();
  await source.bringToFront();
  const native=await source.evaluate(async()=>{
@@ -90,11 +118,15 @@ try{
    document.body.replaceChildren();let parent=document.body;for(let i=0;i<30;i++){const n=document.createElement('div');parent.append(n);parent=n;}
    for(let i=0;i<4000;i++)parent.append(document.createTextNode('node '+i));
    Object.defineProperty(crypto,'randomUUID',{configurable:true,value:undefined});(0,eval)(install);
-   const first=__tabShareDOM.capture();parent.append(document.createTextNode('later'));
-   await Promise.resolve();const next=__tabShareDOM.capture(true);
-   return {first,next,full:__tabShareDOM.fallback().full};
+   const batches=[];let d;do{d=__tabShareDOM.capture();if(d)batches.push(d);}while(d?.meta.pending);
+   parent.append(document.createTextNode('later'));await Promise.resolve();const next=__tabShareDOM.capture();
+   return {batches,next,full:__tabShareDOM.fallback().full};
  },installDOM);
- assert.equal(limited.first.meta.truncated,true);assert.equal(limited.first.nodes.length,1);assert.ok(limited.full);assert.equal(limited.next,null);
- assert.match(limited.first.version,/^[0-9a-f]{32}$/);
- console.log('PASS: large nested DOM produces only video metadata, no repeated partial snapshots; UUID fallback uses Web Crypto');
+ assert.ok(limited.batches.length>1);assert.ok(limited.batches.every(d=>d.nodes.length<=300&&!d.meta.truncated));
+ assert.equal(limited.batches.reduce((n,d)=>n+d.nodes.length,0),4031);assert.equal(limited.full,false);
+ assert.ok(limited.next.nodes.some(n=>n.text==='later'));assert.match(limited.batches[0].version,/^[0-9a-f]{32}$/);
+ const incremental=await visitor.evaluate(batches=>{const mirror=new ReviewMirror(document);for(const batch of batches)mirror.apply(batch);return {text:document.body.textContent,nodes:mirror.nodes.size};},limited.batches);
+ assert.equal(incremental.nodes,4031);assert.ok(incremental.text.includes('node 3999'));
+ console.log('PASS: large nested DOM streams in bounded incremental batches; late children attach; DOM stays active');
+
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
