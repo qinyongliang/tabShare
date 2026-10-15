@@ -13,6 +13,7 @@ const server=http.createServer(async(req,res)=>{
  hits.push(req.url);
  if(req.url==='/font.ttf'){res.setHeader('Content-Type','font/ttf');res.end(font);return;}
  if(req.url==='/icons'){res.setHeader('Content-Type','text/html');res.end(await readFile(new URL('./fixtures/icons.html',import.meta.url)));return;}
+ if(req.url==='/placeholders'){res.setHeader('Content-Type','text/html');res.end(await readFile(new URL('./fixtures/placeholders.html',import.meta.url)));return;}
  if(req.url==='/icon.svg'){res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M10 0L20 20H0Z"/></svg>');return;}
  if(req.url==='/sprite.svg'){res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="paint:star"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><symbol id="star" viewBox="0 0 20 20"><path fill="url(&quot;#paint:star&quot;)" d="M10 0L13 7H20L15 12L17 20L10 16L3 20L5 12L0 7H7Z"/></symbol></svg>');return;}
  if(req.url==='/trusted'){res.setHeader('Content-Security-Policy',"require-trusted-types-for 'script'");res.setHeader('Content-Type','text/html');res.end('<!doctype html><body>Trusted Types page</body>');return;}
@@ -136,5 +137,38 @@ try{
  const ime=await visitor.evaluate(()=>{const frame=document.createElement('iframe');frame.style.cssText='position:fixed;left:40px;top:60px;width:600px;height:300px;border:0;transform:scale(.5);transform-origin:top left';document.body.append(frame);const sent=[],remote=new ReviewRemoteInput(document,frame,m=>sent.push(m),()=>{});remote.activate(100,100);remote.update({caret:{x:120,y:80,height:24,fontSize:20}});const r=remote.box.getBoundingClientRect();remote.box.dispatchEvent(new CompositionEvent('compositionstart'));remote.box.dispatchEvent(new CompositionEvent('compositionend',{data:'中文'}));remote.box.dispatchEvent(new InputEvent('beforeinput',{data:'中文',inputType:'insertFromComposition',cancelable:true}));remote.release();return {x:r.x,y:r.y,height:r.height,sent,hidden:remote.box.hidden};});
  assert.ok(Math.abs(ime.x-100)<1&&Math.abs(ime.y-100)<1&&Math.abs(ime.height-12)<1,'IME proxy uses scaled viewport caret coordinates');assert.deepEqual(ime.sent,[{action:'text',text:'中文'}]);assert.equal(ime.hidden,true);
  console.log('PASS: caret geometry and selected text; scaled IME proxy commits composition once at the remote caret');
+
+ const placeholderSource=await browser.newPage(),placeholderMirror=await browser.newPage();
+ await placeholderSource.goto('http://127.0.0.1:'+server.address().port+'/placeholders');await placeholderSource.evaluate(installDOM);
+ await placeholderSource.evaluate(()=>{const unrelated=document.querySelector('#unrelated');for(let i=0;i<1000;i++)unrelated.append(document.createElement('span'));});
+ await placeholderMirror.goto('http://127.0.0.1:'+server.address().port);await placeholderMirror.evaluate(mirrorSource);await placeholderMirror.evaluate(()=>{globalThis.placeholderMirror=new ReviewMirror(document);});
+ async function syncPlaceholders(){const batches=await placeholderSource.evaluate(()=>{const batches=[];let d;do{d=__tabShareDOM.capture();if(d)batches.push(d);}while(d?.meta.pending);return batches;});await placeholderMirror.evaluate(batches=>{for(const d of batches)placeholderMirror.apply(d);},batches);return batches;}
+ await syncPlaceholders();
+ assert.equal(await placeholderMirror.locator('#hint').evaluate(n=>getComputedStyle(n).opacity),'1');
+ await placeholderSource.locator('#plain').fill('a');const firstInput=await syncPlaceholders();
+ assert.equal(await placeholderMirror.locator('#hint').evaluate(n=>getComputedStyle(n).opacity),'0','typing must hide a CSS placeholder outside the input');
+ assert.equal(await placeholderMirror.locator('#outline').evaluate(n=>getComputedStyle(n).color),'rgb(20, 80, 200)','focus-within styles follow input focus');
+ assert.ok(firstInput.every(d=>!d.reset),'placeholder updates use differences');
+ const typingCost=await placeholderSource.evaluate(()=>{const original=globalThis.getComputedStyle;let unrelated=0;globalThis.getComputedStyle=(node,...args)=>{if(document.querySelector('#unrelated').contains(node))unrelated++;return original(node,...args);};const node=document.querySelector('#plain');node.value='ab';node.dispatchEvent(new InputEvent('input',{bubbles:true,data:'b'}));const d=__tabShareDOM.capture();globalThis.getComputedStyle=original;return {unrelated,updated:d?.updates?.length||0,nodes:d?.nodes?.length||0,reset:d?.reset};});
+ assert.equal(typingCost.unrelated,0,'ordinary typing must not rescan unrelated computed styles');assert.equal(typingCost.nodes,0);assert.equal(typingCost.updated,1);assert.equal(typingCost.reset,false);
+ await placeholderSource.locator('#plain').fill('');await syncPlaceholders();assert.equal(await placeholderMirror.locator('#hint').evaluate(n=>getComputedStyle(n).opacity),'1','clearing restores the placeholder');
+ await placeholderSource.locator('#rich').fill('hello');await syncPlaceholders();assert.equal(await placeholderMirror.locator('#rich-field').evaluate(n=>getComputedStyle(n,'::before').content),'none','typing removes an ancestor pseudo-element placeholder');
+ await placeholderSource.locator('#rich').evaluate(n=>{n.replaceChildren();n.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));});await syncPlaceholders();assert.equal(await placeholderMirror.locator('#rich-field').evaluate(n=>getComputedStyle(n,'::before').content),'"请输入内容"','clearing restores the pseudo-element placeholder');
+ await placeholderSource.locator('#hover').hover();await syncPlaceholders();assert.equal(await placeholderMirror.locator('#hover').evaluate(n=>getComputedStyle(n).backgroundColor),'rgb(10, 90, 160)');assert.equal(await placeholderMirror.locator('#hover-hint').evaluate(n=>getComputedStyle(n).opacity),'1','hover updates sibling styles outside the target');
+ await placeholderSource.mouse.move(1200,700);await syncPlaceholders();assert.equal(await placeholderMirror.locator('#hover-hint').evaluate(n=>getComputedStyle(n).opacity),'0','leaving resets hover styles');
+ await placeholderMirror.evaluate((await readFile(new URL('../web/pointer.js',import.meta.url),'utf8')).replace('export class PointerForwarder','globalThis.ReviewPointerForwarder=class PointerForwarder'));
+ const pointerResult=await placeholderMirror.evaluate(async()=>{
+   const frame=document.createElement('iframe');frame.style.cssText='position:fixed;left:40px;top:60px;width:600px;height:300px;transform:scale(.5);transform-origin:top left';document.body.append(frame);await new Promise(resolve=>{if(frame.contentDocument.readyState==='complete')resolve();else frame.onload=resolve;});
+   const sent=[],doc=frame.contentDocument,pointer=new ReviewPointerForwarder(doc,frame,m=>sent.push(m));const node=doc.createElement('div');doc.body.append(node);
+   const move=(x,y)=>node.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,clientX:x,clientY:y,pointerType:'mouse',buttons:0}));
+   move(120,80);move(130,90);move(140,100);await new Promise(resolve=>setTimeout(resolve,60));const tail=sent.at(-1);
+   node.dispatchEvent(new PointerEvent('pointerleave',{pointerType:'mouse'}));const descendantLeave=sent.at(-1).action;
+   move(150,110);frame.dispatchEvent(new PointerEvent('pointerleave',{pointerType:'mouse'}));await new Promise(resolve=>setTimeout(resolve,60));const end=sent.at(-1),count=sent.length;
+   pointer.dispose();move(200,200);frame.remove();return {tail,descendantLeave,end,count,disposed:sent.length===count};
+ });
+ assert.equal(pointerResult.tail.x,140);assert.equal(pointerResult.tail.y,100);assert.ok(!pointerResult.tail.nodeId,'movement uses viewport coordinates');assert.equal(pointerResult.descendantLeave,'mouseMoved');assert.equal(pointerResult.end.action,'mouseLeave');assert.ok(pointerResult.count<=4);assert.equal(pointerResult.disposed,true);
+ await placeholderSource.close();await placeholderMirror.close();
+ console.log('PASS: placeholders hide/restore, focus and sibling hover styles synchronize; ordinary typing updates one control without scanning 1000 unrelated elements');
+ console.log('PASS: viewport pointer positions preserve the trailing move; leaving cancels pending moves and resets source hover');
 
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

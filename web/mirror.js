@@ -89,7 +89,12 @@ export class Mirror {
   }
   pseudos(id,values) {
     if(!/^\d+$/.test(id))return;
-    let style=this.doc.getElementById('ts-pseudo-'+id);if(!style){style=this.doc.createElement('style');style.id='ts-pseudo-'+id;this.doc.head.append(style);}style.textContent='';
+    let style=this.doc.getElementById('ts-pseudo-'+id);
+    if(!Object.keys(values).length){style?.remove();return;}
+    if(!style){style=this.doc.createElement('style');style.id='ts-pseudo-'+id;this.doc.head.append(style);}
+    // insertRule changes CSSOM, not textContent. Assigning an already empty
+    // textContent leaves those old rules alive (including editor placeholders).
+    while(style.sheet.cssRules.length)style.sheet.deleteRule(style.sheet.cssRules.length-1);
     for(const [pseudo,props] of Object.entries(values)){if(!['::before','::after','::backdrop'].includes(pseudo))continue;const i=style.sheet.insertRule('[data-node-id="'+id+'"]'+pseudo+' {}');const rule=style.sheet.cssRules[i];for(const [name,value] of Object.entries(props)){const safe=this.safeStyle(value);if(safe!==null)rule.style.setProperty(name,safe);}}
   }
   assetIDs(value) {return new Set(String(value||'').match(/ts-asset:[A-Za-z0-9_-]+/g)?.map(v=>v.slice(9))||[]);}

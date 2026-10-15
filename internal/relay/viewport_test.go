@@ -25,10 +25,18 @@ func TestViewportDriverIdentityAndRelease(t *testing.T) {
 	agent := dial(t, f, "/ws/agent", Message{Type: "hello", Token: f.s.token, AgentID: session.AgentID})
 	readType(t, agent, "ready")
 	one := dial(t, f, "/ws/view/"+session.ID, Message{Type: "join", Key: session.Key})
-	oneID := readType(t, one, "joined").ViewerID
+	oneJoined := readType(t, one, "joined")
+	oneID := oneJoined.ViewerID
+	if !oneJoined.AutoViewport {
+		t.Fatal("first viewer must be the automatic viewport driver")
+	}
 	readType(t, one, "viewport")
 	two := dial(t, f, "/ws/view/"+session.ID, Message{Type: "join", Key: session.Key})
-	twoID := readType(t, two, "joined").ViewerID
+	twoJoined := readType(t, two, "joined")
+	twoID := twoJoined.ViewerID
+	if twoJoined.AutoViewport {
+		t.Fatal("concurrent join must not override the automatic driver")
+	}
 	readType(t, two, "viewport")
 	forged := randomID()
 	write(t, one, Message{Type: "input", Input: &Input{Action: "viewport", ViewerID: forged, Width: 390, Height: 700, DeviceScaleFactor: 2}})

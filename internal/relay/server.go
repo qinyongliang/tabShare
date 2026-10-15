@@ -55,35 +55,36 @@ type RasterRegion struct {
 	Cuts        []RasterCut `json:"cuts,omitempty"`
 }
 type Message struct {
-	Download   *DownloadChunk  `json:"download,omitempty"`
-	Image      *ClipboardImage `json:"image,omitempty"`
-	Region     *RasterRegion   `json:"region,omitempty"`
-	Type       string          `json:"type"`
-	Signal     *Signal         `json:"signal,omitempty"`
-	ICEServers []ICEServer     `json:"iceServers,omitempty"`
-	ViewerID   string          `json:"viewerId,omitempty"`
-	Viewport   *Viewport       `json:"viewport,omitempty"`
-	Asset      *AssetMeta      `json:"asset,omitempty"`
-	Assets     []AssetMeta     `json:"assets,omitempty"`
-	Mode       string          `json:"mode,omitempty"`
-	Dialog     *Dialog         `json:"dialog,omitempty"`
-	SessionID  string          `json:"sessionId,omitempty"`
-	Token      string          `json:"token,omitempty"`
-	AgentID    string          `json:"agentId,omitempty"`
-	Key        string          `json:"key,omitempty"`
-	Session    *Session        `json:"session,omitempty"`
-	Data       string          `json:"data,omitempty"`
-	Width      float64         `json:"width,omitempty"`
-	Height     float64         `json:"height,omitempty"`
-	Status     string          `json:"status,omitempty"`
-	Detail     string          `json:"detail,omitempty"`
-	URL        string          `json:"url,omitempty"`
-	Title      string          `json:"title,omitempty"`
-	Viewers    int             `json:"viewers,omitempty"`
-	Input      *Input          `json:"input,omitempty"`
-	Document   *Document       `json:"document,omitempty"`
-	NodeID     string          `json:"nodeId,omitempty"`
-	Full       bool            `json:"full,omitempty"`
+	Download     *DownloadChunk  `json:"download,omitempty"`
+	Image        *ClipboardImage `json:"image,omitempty"`
+	Region       *RasterRegion   `json:"region,omitempty"`
+	Type         string          `json:"type"`
+	Signal       *Signal         `json:"signal,omitempty"`
+	ICEServers   []ICEServer     `json:"iceServers,omitempty"`
+	ViewerID     string          `json:"viewerId,omitempty"`
+	Viewport     *Viewport       `json:"viewport,omitempty"`
+	AutoViewport bool            `json:"autoViewport,omitempty"`
+	Asset        *AssetMeta      `json:"asset,omitempty"`
+	Assets       []AssetMeta     `json:"assets,omitempty"`
+	Mode         string          `json:"mode,omitempty"`
+	Dialog       *Dialog         `json:"dialog,omitempty"`
+	SessionID    string          `json:"sessionId,omitempty"`
+	Token        string          `json:"token,omitempty"`
+	AgentID      string          `json:"agentId,omitempty"`
+	Key          string          `json:"key,omitempty"`
+	Session      *Session        `json:"session,omitempty"`
+	Data         string          `json:"data,omitempty"`
+	Width        float64         `json:"width,omitempty"`
+	Height       float64         `json:"height,omitempty"`
+	Status       string          `json:"status,omitempty"`
+	Detail       string          `json:"detail,omitempty"`
+	URL          string          `json:"url,omitempty"`
+	Title        string          `json:"title,omitempty"`
+	Viewers      int             `json:"viewers,omitempty"`
+	Input        *Input          `json:"input,omitempty"`
+	Document     *Document       `json:"document,omitempty"`
+	NodeID       string          `json:"nodeId,omitempty"`
+	Full         bool            `json:"full,omitempty"`
 }
 type Input struct {
 	Version           string     `json:"version,omitempty"`
@@ -789,7 +790,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	defer p.cancel()
 	l.viewers[p] = true
 	s.turnViewers[p.id] = true
-	send(p, Message{Type: "joined", ViewerID: p.id, ICEServers: s.iceServers(p.id)})
+	send(p, Message{Type: "joined", ViewerID: p.id, ICEServers: s.iceServers(p.id), AutoViewport: len(l.viewers) == 1})
 	send(p, Message{Type: "viewport", Viewport: l.viewport})
 	s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 	send(p, Message{Type: "status", Status: l.status, URL: se.URL, Title: se.Title})
@@ -922,6 +923,8 @@ func validInput(i *Input) bool {
 		}
 	}
 	switch i.Action {
+	case "mouseLeave":
+		return i.NodeID == ""
 	case "mouseMoved", "mousePressed", "mouseReleased", "mouseWheel":
 		if i.Button != "" && i.Button != "none" && i.Button != "left" && i.Button != "right" && i.Button != "middle" {
 			return false

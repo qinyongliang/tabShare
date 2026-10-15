@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{font:16px system-ui;margin:30px}.field,.rich-field{position:relative;width:340px;margin-bottom:24px}.field input,.editor{width:100%;min-height:40px;padding:8px;border:1px solid #888;box-sizing:border-box}.hint{opacity:0;color:#777;pointer-events:none}.field:has(input:placeholder-shown) .hint{opacity:1}.outline{color:rgb(100,100,100)}.field:focus-within .outline{color:rgb(20,80,200)}.rich-field:has(.editor:empty)::before{content:"请输入内容";position:absolute;left:8px;top:8px;color:#777;pointer-events:none}
+</style></head><body>
+<div class="field"><input id="plain" placeholder="请输入文字"><span class="hint" id="hint">输入后隐藏</span><span class="outline" id="outline">焦点状态</span></div>
+<div class="rich-field" id="rich-field"><div class="editor" id="rich" contenteditable="true"></div></div>
+<style>#hover{width:200px;height:40px;background:rgb(220,220,220)}#hover:hover{background:rgb(10,90,160)}#hover:hover + #hover-hint{opacity:1}#hover-hint{opacity:0}</style>
+<div id="hover">Hover target</div><span id="hover-hint">Hover sibling</span>
+<div id="unrelated">Unrelated static content</div>
+</body></html>

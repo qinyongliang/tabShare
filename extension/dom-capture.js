@@ -2,7 +2,7 @@ import {draggable} from './draggable.js';
 import {caretPosition,selectionState} from './caret.js';
 // The code below runs only in an isolated world of the explicitly shared tab.
 function bootstrap(draggable,caretPosition,selectionState) {
-  if(globalThis.__tabShareDOM&&!globalThis.__tabShareDOM.disposed){if(globalThis.__tabShareDOM.format===2)return;globalThis.__tabShareDOM.dispose?.();}
+  if(globalThis.__tabShareDOM&&!globalThis.__tabShareDOM.disposed){if(globalThis.__tabShareDOM.format===3)return;globalThis.__tabShareDOM.dispose?.();}
   const ids = new WeakMap(), nodes = new Map(), previous = new Map(), sizes=new Map(),dirty = new Set(), subtrees=new Set(), controls=new Set(), observed=new WeakSet(), listeners=[];
   const resources=new Map(), requests=[], closedRoots=new WeakMap(), extraCSS=new Map(), failedResources=new Set(),resourceUsers=new Map(),nodeAssets=new Map(),failedNodes=new Set();
   const blobDownloads=new Map(),downloadRequests=[];
@@ -20,6 +20,32 @@ function bootstrap(draggable,caretPosition,selectionState) {
   const forbidden = new Set(['SCRIPT','STYLE','LINK','META','BASE','NOSCRIPT','TEMPLATE']);
   const unsupported = new Set(['IFRAME','FRAME','OBJECT','EMBED','CANVAS','VIDEO','AUDIO']);
   const observers = [], styleRoots=new Set(), loadedURLs=new Set(), usedFonts=new Set();
+  // Computed styles have no live CSS selectors in the mirror. Track state-rule
+  // matches so editing a control also invalidates its labels/ancestor pseudos.
+  // Only changed matches are serialized; selector work is coalesced and budgeted.
+  const stateRules=new Map(),stateQueue=new Set(),controlStates=new WeakMap();let cssEpoch=0;
+  function stateMask(selector){return (/:placeholder-shown\b|:(?:checked|indeterminate|valid|invalid|user-valid|user-invalid|in-range|out-of-range)\b/.test(selector)?1:0)|(/:focus(?:-within|-visible)?\b/.test(selector)?2:0)|(/:(?:hover|active)\b/.test(selector)?4:0)|(/:(?:has|empty|disabled|enabled|read-only|read-write|open|popover-open)\b/.test(selector)?8:0);}
+  function invalidateState(mask){for(const rules of stateRules.values())for(const rule of rules.values())if(rule.mask&mask)stateQueue.add(rule);}
+  function controlState(node){return [node.matches?.(':placeholder-shown'),node.matches?.(':empty'),node.checked,node.indeterminate,node.selectedIndex,node.validity?.valid,node.validity?.rangeUnderflow,node.validity?.rangeOverflow].join(':');}
+  function checkControl(node){const state=controlState(node);if(controlStates.get(node)!==state){controlStates.set(node,state);invalidateState(1|8);}}
+  function stateEvent(event){mark(event.target);if(event.type==='input'||event.type==='change')checkControl(event.target);else if(event.type!=='scroll')invalidateState(1|2|8);if(event.target?.type==='radio')for(const n of event.target.getRootNode().querySelectorAll('input[type=radio]')){mark(n);checkControl(n);}}
+  function trackRule(selector,root){
+    const mask=stateMask(selector);if(!mask)return;
+    selector=selector.replace(/::(?:before|after|backdrop)\b/g,'');
+    let rules=stateRules.get(root);if(!rules){rules=new Map();stateRules.set(root,rules);}
+    let rule=rules.get(selector);if(!rule){rule={selector,root,mask,matches:new Set()};rules.set(selector,rule);stateQueue.add(rule);}rule.epoch=cssEpoch;
+  }
+  function refreshState(){
+    const started=performance.now();
+    for(const rule of stateQueue){
+      stateQueue.delete(rule);let matches;
+      try{matches=new Set(rule.root.querySelectorAll(rule.selector));}catch{continue;}
+      for(const node of rule.matches)if(node.isConnected&&!matches.has(node))mark(node,true);
+      for(const node of matches)if(!rule.matches.has(node))mark(node,true);
+      rule.matches=matches;
+      if(performance.now()-started>=6)break;
+    }
+  }
   function mark(node, subtree = false) {
     if (!node || node===widget || node.parentElement?.closest('[data-tabshare-owner-ui]')) return;
     if(node===document.documentElement||node===document.head)rootStyleDirty=true;
@@ -34,17 +60,16 @@ function bootstrap(draggable,caretPosition,selectionState) {
   function observe(root) {
     if(observed.has(root))return;observed.add(root);if(root instanceof ShadowRoot)styleRoots.add(root);
     const observer = new MutationObserver(records => {
-      for (const record of records) mark(record.type === 'childList' ? record.target : record.target, record.type === 'attributes' && ['class','style','hidden'].includes(record.attributeName));
+      let changed=false;
+      for (const record of records) {if(record.target===widget||record.target.parentElement?.closest('[data-tabshare-owner-ui]'))continue;mark(record.target, record.type === 'attributes'&&['class','style','hidden','data-empty','data-state','data-placeholder','aria-expanded'].includes(record.attributeName));changed=true;}
+      if(changed)invalidateState(15);
     });
     observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true}); observers.push(observer);
   }
   function listen(target,type,fn,capture=true){target.addEventListener(type,fn,capture);listeners.push([target,type,fn,capture]);}
-  function dispose(){for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();subtrees.clear();blobDownloads.clear();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
+  function dispose(){for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();subtrees.clear();stateRules.clear();stateQueue.clear();blobDownloads.clear();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
   observe(document.documentElement);
-  for (const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle']) listen(document,type,event => {
-    mark(event.target);
-    if (event.target?.type === 'radio') for (const n of document.querySelectorAll('input[type=radio]')) mark(n);
-  });
+  for (const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle']) listen(document,type,stateEvent);
   listen(document,'load',e=>{if(['LINK','STYLE'].includes(e.target.tagName)){rootStyleDirty=true;mark(document.body,true);}else if(['IMG','VIDEO','IFRAME'].includes(e.target.tagName)){mark(e.target.parentElement,true);for(let n=e.target.parentElement;n;n=n.parentElement)mark(n);}});
   if(document.fonts)listen(document.fonts,'loadingdone',()=>{rootStyleDirty=true;mark(document.body,true);});
   listen(document,'paste',e=>{if(e.clipboardData?.files.length)imagePasteCount++;});
@@ -55,7 +80,8 @@ function bootstrap(draggable,caretPosition,selectionState) {
   listen(globalThis,'scroll',()=>mark(document.body));
   listen(globalThis,'resize',()=>{rootStyleDirty=true;mark(document.body,true);});
   let dprQuery;function changedDPR(){watchDPR();mark(document.body,true);}function watchDPR(){dprQuery?.removeEventListener('change',changedDPR,true);dprQuery=matchMedia('(resolution: '+devicePixelRatio+'dppx)');listen(dprQuery,'change',changedDPR);}watchDPR();
-  for(const type of ['mouseover','mouseout'])listen(document,type,event=>mark(event.target.parentElement===document.body?event.target:event.target.parentElement,true));
+  for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(document,type,()=>invalidateState(4));
+  for(const type of ['transitionend','transitioncancel'])listen(document,type,e=>mark(e.target,true));
   function resource(url,kind='image',base=location.href) {
     try {
       const u=new URL(url,base);if(!['http:','https:','blob:','data:'].includes(u.protocol))return '';
@@ -70,8 +96,9 @@ function bootstrap(draggable,caretPosition,selectionState) {
   }
   function fontNames(value) {return value.split(',').map(v=>v.trim().replace(/^['"]|['"]$/g,'').toLowerCase());}
   function styleOf(computed,visible=true) {if(visible)for(const name of fontNames(computed.fontFamily))usedFonts.add(name);const style={};for(const name of properties){const v=computed.getPropertyValue(name);if(v&&v!==baseline?.[name]&&!(followsColor(name)&&v===computed.color))style[name]=rewrite(v,location.href,'image',visible);}return style;}
-  function readRules(list,base,out) {
+  function readRules(list,base,out,root=document) {
     for(const rule of list){
+      if(rule.selectorText)trackRule(rule.selectorText,root);
       if(rule.type===CSSRule.KEYFRAMES_RULE)out.push(rewrite(rule.cssText,base));
       else if(rule.type===CSSRule.FONT_FACE_RULE){
         if(!fontNames(rule.style.getPropertyValue('font-family')).some(name=>usedFonts.has(name)))continue;
@@ -79,14 +106,16 @@ function bootstrap(draggable,caretPosition,selectionState) {
         const usable=sources.filter(source=>{if(/^local\(/i.test(source))return true;const m=/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/i.exec(source);try{return !!m&&loadedURLs.has(new URL(m[1]??m[2]??m[3],base).href);}catch{return false;}});
         if(usable.length){const descriptors=[...rule.style].filter(name=>name!=='src').map(name=>name+':'+rule.style.getPropertyValue(name));out.push('@font-face{'+descriptors.join(';')+';src:'+rewrite(usable.join(','),base,'font')+'}');}
       }
-      else if(rule.cssRules)readRules(rule.cssRules,base,out);
+      else if(rule.cssRules)readRules(rule.cssRules,base,out,root);
     }
   }
   function addStyles(css,url) {try{const sheet=new CSSStyleSheet();sheet.replaceSync(css);extraCSS.set(url,{sheet,base:url});mark(document.body,true);}catch{}}
   function registerShadow(host,root) {
     if(!host||host===widget||closedRoots.get(host)===root)return;
     closedRoots.set(host,root);observe(root);mark(host,true);
-    for(const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle'])listen(root,type,e=>mark(e.target));
+    for(const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle'])listen(root,type,stateEvent);
+    for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(root,type,()=>invalidateState(4));
+    for(const type of ['transitionend','transitioncancel'])listen(root,type,e=>mark(e.target,true));
   }
   function setMode(value) {
     if(value!=='dom'||mode===value)return;
@@ -133,12 +162,13 @@ function bootstrap(draggable,caretPosition,selectionState) {
     return Object.keys(changes).length?changes:null;
   }
   function cssAnimations() {
+    cssEpoch++;
     if(rootStyleDirty){const computed=getComputedStyle(document.documentElement),names=['display','font-size','font-family','line-height','direction','writing-mode','color-scheme','background-color','color','scrollbar-width','scrollbar-color','scrollbar-gutter','zoom','position','transform','transform-origin','perspective','perspective-origin','filter','contain','isolation','padding','margin','border','box-sizing','overflow','overflow-x','overflow-y'];rootCSS=':root{'+names.map(name=>name+':'+rewrite(computed.getPropertyValue(name))).join(';')+'}';rootStyleDirty=false;}
     const rules=[rootCSS,':where([data-node-id]),:where([data-node-id])::before,:where([data-node-id])::after,:where([data-node-id])::backdrop{'+Object.entries(baseline||{}).filter(([,v])=>v).map(([k,v])=>k+':'+v).join(';')+'}'];
     for(const root of [...styleRoots])if(!root.host.isConnected)styleRoots.delete(root);
-    const sheets=[...document.styleSheets,...document.adoptedStyleSheets];for(const root of styleRoots)sheets.push(...root.styleSheets,...root.adoptedStyleSheets);
-    for(const sheet of sheets){try{readRules(sheet.cssRules,sheet.href||location.href,rules);}catch{}}
+    for(const root of [document,...styleRoots])for(const sheet of [...root.styleSheets,...root.adoptedStyleSheets]){try{readRules(sheet.cssRules,sheet.href||location.href,rules,root);}catch{}}
     for(const item of extraCSS.values())readRules(item.sheet.cssRules,item.base,rules);
+    for(const [root,items] of stateRules){for(const [selector,rule] of items)if(rule.epoch!==cssEpoch){items.delete(selector);stateQueue.delete(rule);}if(!items.size)stateRules.delete(root);}
     return rules.join('\n').slice(0,100000);
   }
   function capture() {
@@ -148,8 +178,9 @@ function bootstrap(draggable,caretPosition,selectionState) {
     if(first){dirty.add(document.body);subtrees.add(document.body);}
     if(Date.now()-lastControlCheck>1000){
       lastControlCheck=Date.now();
-      for(const node of controls){if(!node.isConnected){controls.delete(node);continue;}const old=previous.get(ids.get(node));const value=node.type==='password'?'':String(node.value).slice(0,16000);if(old&&(old.value!==value||old.checked!==!!node.checked||old.selectedIndex!==(node.selectedIndex??null)))mark(node);}
+      for(const node of controls){if(!node.isConnected){controls.delete(node);continue;}const old=previous.get(ids.get(node));const value=node.type==='password'?'':String(node.value).slice(0,16000);if(old&&(old.value!==value||old.checked!==!!node.checked||old.selectedIndex!==(node.selectedIndex??null))){mark(node);checkControl(node);}}
     }
+    refreshState();
     const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio,contextMenu,caret:caretPosition(document,node=>closedRoots.get(node),widgetRoot),selection:selectionState(document,node=>closedRoots.get(node)),pending:dirty.size>0};
     const hadWork=dirty.size>0, fresh=[],updates=[],removes=[];
     let count=0,packetBytes=0;const started=performance.now();
@@ -174,7 +205,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
         else{
           if(node.tagName==='A')try{const href=new URL(node.href);if(['http:','https:'].includes(href.protocol))value.href=href.href.slice(0,8192);}catch{}
           if(node.tagName==='IMG'){attrs.src=visible?resource(node.currentSrc||node.src):'';if(failedNodes.has(id)){value.tag='div';value.unsupported='image';}}
-          if(['INPUT','TEXTAREA','SELECT'].includes(node.tagName)){controls.add(node);value.value=node.type==='password'?'':String(node.value).slice(0,16000);value.checked=!!node.checked;value.selectedIndex=node.selectedIndex??null;if(typeof node.selectionStart==='number'&&node===node.getRootNode().activeElement)value.caret={start:node.selectionStart,end:node.selectionEnd};}
+          if(['INPUT','TEXTAREA','SELECT'].includes(node.tagName)){controls.add(node);controlStates.set(node,controlState(node));value.value=node.type==='password'?'':String(node.value).slice(0,16000);value.checked=!!node.checked;value.selectedIndex=node.selectedIndex??null;if(typeof node.selectionStart==='number'&&node===node.getRootNode().activeElement)value.caret={start:node.selectionStart,end:node.selectionEnd};}
           if(node.tagName==='OPTION'){attrs.value=node.value;value.selected=!!node.selected;}
           if(node.isContentEditable&&node.hasAttribute('contenteditable'))value.editable=true;
           value.pseudos={};for(const pseudo of ['::before','::after','::backdrop']){const c=getComputedStyle(node,pseudo);if(pseudo==='::backdrop'&&node.tagName==='DIALOG'||c.content&&!['none','normal'].includes(c.content))value.pseudos[pseudo]={...styleOf(c,visible),content:rewrite(c.content,location.href,'image',visible)};}
@@ -198,9 +229,10 @@ function bootstrap(draggable,caretPosition,selectionState) {
       if(++count>=300||packetBytes>=160000||performance.now()-started>=24)break;
     }
     if(hadWork)for(const [id,node] of nodes)if(!node.isConnected){nodes.delete(id);for(const asset of nodeAssets.get(id)||[]){const users=resourceUsers.get(asset);users?.delete(id);if(!users?.size)resourceUsers.delete(asset);}nodeAssets.delete(id);failedNodes.delete(id);if(previous.delete(id)){removes.push(id);retainedBytes-=sizes.get(id)||0;sizes.delete(id);controls.delete(node);}}
-    meta.pending=dirty.size>0;meta.truncated=truncated;
+    meta.truncated=truncated;
     const result={version,sequence:sequence+1,reset:first,root:idFor(document.body),nodes:fresh,updates,removes,meta};
     if(first||hadWork){const css=cssAnimations();if(first||css!==lastCSS){result.css=css;result.cssChanged=true;lastCSS=css;}}
+    meta.pending=dirty.size>0||stateQueue.size>0;
     if(requests.length)result.resources=requests.splice(0);
     if(downloadRequests.length)result.downloads=downloadRequests.splice(0);
     first=false;
@@ -282,7 +314,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
       return images;
     }finally{image.close();}
   }
-  globalThis.__tabShareDOM={format:2,cropFrame,async downloadPart(url,offset){const blob=await downloadBlob(url),bytes=new Uint8Array(await blob.slice(offset,offset+262144).arrayBuffer());let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),size:blob.size,mime:blob.type};},downloadDone(url){blobDownloads.delete(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
+  globalThis.__tabShareDOM={format:3,cropFrame,async downloadPart(url,offset){const blob=await downloadBlob(url),bytes=new Uint8Array(await blob.slice(offset,offset+262144).arrayBuffer());let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),size:blob.size,mime:blob.type};},downloadDone(url){blobDownloads.delete(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
     try{const bytes=Uint8Array.from(atob(input.data),c=>c.charCodeAt(0));let blob=new Blob([bytes],{type:input.mime});if(input.mime!=='image/png'){const image=await createImageBitmap(blob);if(image.width*image.height>16777216){image.close();return false;}const canvas=new OffscreenCanvas(image.width,image.height);canvas.getContext('2d').drawImage(image,0,0);image.close();blob=await canvas.convertToBlob({type:'image/png'});}await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);return true;}catch{return false;}
   },get imagePasteCount(){return imagePasteCount;},ownerViewport(value){ownerViewport=value;widgetDrag?.resize();},capture,act,fallback,dispose,registerShadow,addStyles,setMode,limit,loadedResources(urls){let changed=false;for(const url of urls)if(!loadedURLs.has(url)){loadedURLs.add(url);changed=true;}if(changed)mark(document.body);},invalidate(){rootStyleDirty=true;mark(document.body,true);},resourceFailed(id){failedResources.add(id);for(const nodeId of resourceUsers.get(id)||[]){failedNodes.add(nodeId);mark(nodes.get(nodeId));}},disposed:false,reset(){widget?.style.removeProperty('pointer-events');first=true;previous.clear();sizes.clear();retainedBytes=0;nodeAssets.clear();resourceUsers.clear();failedNodes.clear();truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
 }

@@ -33,6 +33,7 @@ export async function resolveTab(api, session, binding, epoch) {
   return api.create({url: session.url, active: false});
 }
 export function cdpInput(input) {
+  if(input.action==='mouseLeave')return ['Input.dispatchMouseEvent',{type:'mouseMoved',x:-1,y:-1,button:'none',buttons:0,modifiers:0}];
   const {action, ...rest} = input;
   if (['mouseMoved', 'mousePressed', 'mouseReleased', 'mouseWheel'].includes(action)) {
     const params = {type: action, x: rest.x || 0, y: rest.y || 0, button: rest.button || 'none', buttons: rest.buttons || 0, modifiers: rest.modifiers || 0};
@@ -65,6 +66,7 @@ export function validPeerInput(i) {
   if(!short(i.version,80)||!short(i.text,8192)||!short(i.key,64)||!short(i.code,64)||!short(i.nodeId,32)||!bounded(i.modifiers??0,0,15))return false;
   if(i.selection){const s=i.selection;if(!short(s.anchor,32)||!short(s.focus,32)||['anchorOffset','focusOffset','start','end'].some(k=>!bounded(s[k]??0,0,100000)))return false;}
   switch(i.action){
+    case 'mouseLeave':return !i.nodeId;
     case 'mouseMoved':case 'mousePressed':case 'mouseReleased':case 'mouseWheel':return ['','none','left','right','middle'].includes(i.button??'')&&bounded(i.x,0,16384)&&bounded(i.y,0,16384)&&bounded(i.buttons??0,0,7)&&bounded(i.clickCount??0,0,3)&&bounded(i.deltaX??0,-10000,10000)&&bounded(i.deltaY??0,-10000,10000);
     case 'keyDown':case 'keyUp':return bounded(i.keyCode??0,0,255);
     case 'text':return typeof i.text==='string'&&i.text.length>0;

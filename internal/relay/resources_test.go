@@ -69,6 +69,9 @@ func TestResourcesAreScopedImmutableAndReleased(t *testing.T) {
 }
 
 func TestCompatibilityInputValidation(t *testing.T) {
+	if !validInput(&Input{Action: "mouseLeave"}) || validInput(&Input{Action: "mouseLeave", NodeID: "3"}) {
+		t.Fatal("invalid mouse leave validation")
+	}
 	for _, input := range []*Input{{Action: "mode", Mode: "dom"}, {Action: "history", EntryID: 42}, {Action: "dialog", DialogID: randomID()}, {Action: "selection", NodeID: "3", Selection: &Selection{Anchor: "4", Focus: "5", AnchorOffset: 1, FocusOffset: 2}}} {
 		if !validInput(input) {
 			t.Errorf("rejected %+v", input)
