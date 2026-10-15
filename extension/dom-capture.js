@@ -10,7 +10,7 @@ function bootstrap() {
   const attributes = ['id','for','open','aria-expanded','aria-label','aria-labelledby','aria-describedby','type','placeholder','title','alt','role','colspan','rowspan','maxlength','min','max','step','size','multiple','disabled','readonly','required','name','lang','dir','popover'];
   const forbidden = new Set(['SCRIPT','STYLE','LINK','META','BASE','NOSCRIPT','TEMPLATE']);
   const unsupported = new Set(['IFRAME','FRAME','OBJECT','EMBED','CANVAS','VIDEO','AUDIO','SVG']);
-  const observers = [], styleRoots=new Set();
+  const observers = [], styleRoots=new Set(), loadedURLs=new Set(), usedFonts=new Set();
   function mark(node, subtree = false) {
     if (!node || node===widget || node.parentElement?.closest('[data-tabshare-owner-ui]')) return;
     // HTML/head events can affect body styles, but these ancestors must never enter the mirror tree.
@@ -51,15 +51,21 @@ function bootstrap() {
   function rewrite(value,base=location.href,kind='image') {
     return value.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi,(_,a,b,c)=>'url("'+resource(a??b??c,kind,base)+'")');
   }
-  function styleOf(computed) {const style={};for(const name of properties){const v=computed.getPropertyValue(name);if(v)style[name]=rewrite(v);}return style;}
+  function fontNames(value) {return value.split(',').map(v=>v.trim().replace(/^['"]|['"]$/g,'').toLowerCase());}
+  function styleOf(computed) {for(const name of fontNames(computed.fontFamily))usedFonts.add(name);const style={};for(const name of properties){const v=computed.getPropertyValue(name);if(v)style[name]=rewrite(v);}return style;}
   function readRules(list,base,out) {
     for(const rule of list){
       if(rule.type===CSSRule.KEYFRAMES_RULE)out.push(rewrite(rule.cssText,base));
-      else if(rule.type===CSSRule.FONT_FACE_RULE)out.push(rewrite(rule.cssText,base,'font'));
+      else if(rule.type===CSSRule.FONT_FACE_RULE){
+        if(!fontNames(rule.style.getPropertyValue('font-family')).some(name=>usedFonts.has(name)))continue;
+        const sources=rule.style.getPropertyValue('src').match(/(?:url|local)\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)(?:\s*(?:format|tech)\([^)]*\))*/gi)||[];
+        const usable=sources.filter(source=>{if(/^local\(/i.test(source))return true;const m=/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/i.exec(source);try{return !!m&&loadedURLs.has(new URL(m[1]??m[2]??m[3],base).href);}catch{return false;}});
+        if(usable.length){const descriptors=[...rule.style].filter(name=>name!=='src').map(name=>name+':'+rule.style.getPropertyValue(name));out.push('@font-face{'+descriptors.join(';')+';src:'+rewrite(usable.join(','),base,'font')+'}');}
+      }
       else if(rule.cssRules)readRules(rule.cssRules,base,out);
     }
   }
-  function addStyles(css,url) {try{const sheet=new CSSStyleSheet();sheet.replaceSync(css);const rules=[];readRules(sheet.cssRules,url,rules);extraCSS.set(url,rules.join('\n'));mark(document.body,true);}catch{}}
+  function addStyles(css,url) {try{const sheet=new CSSStyleSheet();sheet.replaceSync(css);extraCSS.set(url,{sheet,base:url});mark(document.body,true);}catch{}}
   function registerShadow(host,root) {
     if(!host||host===widget||closedRoots.get(host)===root)return;
     closedRoots.set(host,root);observe(root);mark(host,true);
@@ -108,7 +114,7 @@ function bootstrap() {
     for(const root of [...styleRoots])if(!root.host.isConnected)styleRoots.delete(root);
     const sheets=[...document.styleSheets,...document.adoptedStyleSheets];for(const root of styleRoots)sheets.push(...root.styleSheets,...root.adoptedStyleSheets);
     for(const sheet of sheets){try{readRules(sheet.cssRules,sheet.href||location.href,rules);}catch{}}
-    for(const css of extraCSS.values())rules.push(css);
+    for(const item of extraCSS.values())readRules(item.sheet.cssRules,item.base,rules);
     return rules.join('\n').slice(0,100000);
   }
   function capture(pixelsOnly=false) {
@@ -167,11 +173,11 @@ function bootstrap() {
     for(const [id,node] of nodes)if(!node.isConnected){nodes.delete(id);if(previous.delete(id)){removes.push(id);retainedBytes-=sizes.get(id)||0;sizes.delete(id);}}
     const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio};
     const result={version,sequence:++sequence,reset:first,root:idFor(document.body),nodes:fresh,updates,removes,meta};
-    const css=cssAnimations();if(first||css!==lastCSS){result.css=css;lastCSS=css;}
+    const css=cssAnimations();if(first||css!==lastCSS){result.css=css;result.cssChanged=true;lastCSS=css;}
     if(requests.length)result.resources=requests.splice(0);
     first=false;
     // No idle packets or polling of animation styles: only mutations and state changes cause deltas.
-    if(!fresh.length&&!updates.length&&!removes.length&&JSON.stringify(meta)===globalThis.__tabShareLastMeta)return null;
+    if(!fresh.length&&!updates.length&&!removes.length&&!result.cssChanged&&!result.resources?.length&&JSON.stringify(meta)===globalThis.__tabShareLastMeta)return null;
     globalThis.__tabShareLastMeta=JSON.stringify(meta);return result;
   }
   function act(input) {
@@ -219,7 +225,7 @@ function bootstrap() {
     }
     return {mode,full:false,regions,width:innerWidth,height:innerHeight};
   }
-  globalThis.__tabShareDOM={capture,act,fallback,dispose,registerShadow,addStyles,setMode,invalidate(){mark(document.body,true);},resourceFailed(id){failedResources.add(id);},disposed:false,reset(){first=true;previous.clear();sizes.clear();retainedBytes=0;truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
+  globalThis.__tabShareDOM={capture,act,fallback,dispose,registerShadow,addStyles,setMode,loadedResources(urls){let changed=false;for(const url of urls)if(!loadedURLs.has(url)){loadedURLs.add(url);changed=true;}if(changed)mark(document.body);},invalidate(){mark(document.body,true);},resourceFailed(id){failedResources.add(id);},disposed:false,reset(){first=true;previous.clear();sizes.clear();retainedBytes=0;truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
 }
 export const installDOM = '(' + bootstrap.toString() + ')()';
 export const captureDOM = 'globalThis.__tabShareDOM.capture()';

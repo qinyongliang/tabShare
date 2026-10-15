@@ -6,15 +6,16 @@ import (
 )
 
 type Document struct {
-	Version  string           `json:"version"`
-	Sequence int              `json:"sequence"`
-	Reset    bool             `json:"reset"`
-	Root     string           `json:"root"`
-	Nodes    []map[string]any `json:"nodes"`
-	Updates  []NodeUpdate     `json:"updates"`
-	Removes  []string         `json:"removes"`
-	Meta     map[string]any   `json:"meta"`
-	CSS      string           `json:"css,omitempty"`
+	Version    string           `json:"version"`
+	Sequence   int              `json:"sequence"`
+	Reset      bool             `json:"reset"`
+	Root       string           `json:"root"`
+	Nodes      []map[string]any `json:"nodes"`
+	Updates    []NodeUpdate     `json:"updates"`
+	Removes    []string         `json:"removes"`
+	Meta       map[string]any   `json:"meta"`
+	CSSChanged bool             `json:"cssChanged,omitempty"`
+	CSS        string           `json:"css,omitempty"`
 }
 type NodeUpdate struct {
 	ID      string         `json:"id"`
@@ -145,7 +146,7 @@ func (state *documentState) apply(d *Document) error {
 	state.sequence = d.Sequence
 	state.root = d.Root
 	state.meta = d.Meta
-	if d.Reset || d.CSS != "" {
+	if d.Reset || d.CSSChanged || d.CSS != "" {
 		state.css = d.CSS
 	}
 	return nil

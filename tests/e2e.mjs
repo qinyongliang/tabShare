@@ -1,3 +1,4 @@
+import {InputQueue} from '../extension/input-queue.js';
 import {DocumentState} from '../extension/document-state.js';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -71,7 +72,7 @@ try {
     res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#ea5685"/></svg>');
   });await new Promise(resolve=>assets.listen(0,'127.0.0.1',resolve));assetOrigin=`http://127.0.0.1:${assets.address().port}`;
   fixture = http.createServer(async (req, res) => {
-    if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}
+    if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js','video-layout.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}
     if (req.url === '/event' && req.method === 'POST') {
       let text = ''; for await (const chunk of req) text += chunk;
       Object.assign(state, JSON.parse(text)); res.end('ok'); return;
@@ -129,7 +130,7 @@ try {
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
 
   if(rtcEnabled){
@@ -187,6 +188,7 @@ try {
   const two = await view(share.value.shareUrl);
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
   const remoteOne=one.frameLocator('#mirror'),remoteTwo=two.frameLocator('#mirror');
+  const rtcInspect=()=>chrome.runtime.sendMessage({target:'offscreen',type:'inspect'});
   if(rtcEnabled){await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'first viewer real P2P').catch(async error=>{console.log('RTC viewer status:',await one.locator('#status').textContent(),'page errors',errors,'rtc',await one.evaluate(()=>globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))));console.log('Offscreen:',offscreenSession?await cdp.evaluate(offscreenSession,'({ready:globalThis.__ready?.(),rtc:typeof RTCPeerConnection,connections:globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))})'):'not created');throw error;});await until(()=>two.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'second viewer real P2P');console.log('PASS: two authenticated real WebRTC connections via',useTURN?'built-in Go TURN':'P2P',', DOM and input DataChannels');}
   if(rtcEnabled){
     await cdp.evaluate(offscreenSession,'__rtc[0].close()');
@@ -194,6 +196,7 @@ try {
     const before=state.clicks;await remoteOne.locator('#click').click();await until(()=>state.clicks===before+1,'fallback still controls same source tab');
     await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'RTC automatically recovers',18000);
     state.clicks=0;await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'clicks=0'});
+    await until(async()=>(await rtcInspect()).peers.some(p=>p.stats.compressed>0&&p.stats.saved>1000),'real compressed DOM state');
     console.log('PASS: RTC failure, fresh fallback DOM, control continues, automatic WebRTC recovery');
   }
   const beforeDirectDOM=relayDocuments,beforeDirectInputs=relayInputs;
@@ -288,6 +291,7 @@ try {
   await chrome.debugger.sendCommand({tabId:(await getTabs()).find(t=>t.targetId===newSources[0].targetId).id},'Runtime.evaluate',{expression:"document.querySelector('#canvas').style.display='block';document.querySelector('#canvas').getContext('2d').fillRect(0,0,200,90)"});
   const mirroredCanvas=reopened.frameLocator('#mirror').locator('[data-unsupported=canvas]');await mirroredCanvas.locator('[data-raster]').waitFor().catch(async error=>{console.log('Source target states:',vm.runInContext('[...targets].map(([tabId,t])=>({tabId,streaming:t.streaming,frameBusy:t.frameBusy,lastFrame:t.lastFrame}))',sandbox));console.log('Offscreen capture bindings:',await chrome.runtime.sendMessage({target:'offscreen',type:'inspect'}));console.log('Capture frame counts:',sourceFrames,offscreenFrames,videoCommands);console.log('Region geometries:',videoGeometries.slice(-3));console.log('Region video:',await reopened.locator('#stream').evaluate(v=>({ready:v.readyState,width:v.videoWidth,paused:v.paused,track:v.srcObject?.getTracks().map(t=>({state:t.readyState,muted:t.muted}))})));console.log('Region DOM:',await mirroredCanvas.evaluate(n=>({id:n.dataset.nodeId,children:n.children.length,rect:{w:n.getBoundingClientRect().width,h:n.getBoundingClientRect().height}})));console.log('Region errors:',errors.slice(-5));throw error;});await mirroredCanvas.click();await until(()=>state.canvasClicks===1,'canvas region input controls real tab');
   const newTab=(await getTabs()).find(t=>t.targetId===newSources[0].targetId);
+  if(rtcEnabled)await until(async()=>{const capture=(await rtcInspect()).captures.find(c=>c.tabId===newTab.id);return capture?.width===200&&capture.height===90;},'source encodes only the canvas region, not the full viewport');
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"const overlay=document.createElement('div');overlay.id='overlay';overlay.style.cssText='position:absolute;left:45px;top:365px;width:150px;height:60px;background:red;z-index:99';document.body.append(overlay)"});
   await reopened.locator('#fallback').waitFor({state:'visible'});
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#overlay').remove()"});
@@ -303,13 +307,20 @@ try {
   console.log('PASS: canvas region pixels and real input; overlapping overlay switches to full frame then restores DOM');
   await reopened.screenshot({path:path.join(root,'test-results/shared-dom.png')});
   console.log('PASS: URL share reopens a closed tab; tab-only share never opens replacement');
+  if(rtcEnabled){
+    await reopened.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+    await until(async()=>(await rtcInspect()).peers.filter(p=>p.tabId===newTab.id&&p.track==='live').some(p=>p.profile.visible===false&&p.video.maxFramerate===2),'background visitor video budget');
+    await reopened.evaluate(()=>{delete document.visibilityState;document.dispatchEvent(new Event('visibilitychange'));});
+    await until(async()=>(await rtcInspect()).peers.filter(p=>p.tabId===newTab.id&&p.track==='live').some(p=>p.profile.visible===true&&p.video.maxFramerate===30),'foreground video budget restored');
+    console.log('PASS: source-side regional video encoding, compressed DOM and automatic background/foreground video budgets');
+  }
   const beforeDirectResources=resourceUploads;
   await reopened.locator('#address').fill(sourceURL.replace('/fixture','/compat'));await reopened.locator('#address').press('Enter');
   const compatibility=reopened.frameLocator('#mirror');await compatibility.locator('#closed-button').waitFor({state:'visible'});
   assert.equal(await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('#shadow-host').shadowRoot===null",returnByValue:true}).then(r=>r.result.value),true,'fixture uses a closed shadow root');
   await compatibility.locator('#closed-button').click();await until(()=>state.shadowClicked,'closed shadow control');
   await compatibility.locator('#closed-input').click();await reopened.keyboard.type('shadow');await until(()=>state.shadowText==='shadow','closed shadow text input');
-  await until(()=>compatibility.locator('#remote-image').evaluate(e=>e.complete&&e.naturalWidth===80),'cross-origin authenticated image via relay',20000);
+  await until(()=>compatibility.locator('#remote-image').evaluate(e=>e.complete&&e.naturalWidth===80),'cross-origin authenticated image via relay',20000).catch(async error=>{console.log('Image diagnostic:',{reads:resourceReads,viewer:await compatibility.locator('#remote-image').evaluate(e=>({src:e.getAttribute('src'),complete:e.complete,width:e.naturalWidth})),transport:await reopened.locator('#status').textContent(),offscreen:rtcEnabled?await rtcInspect():null});throw error;});
   assert.ok(assetHits.find(hit=>hit.url==='/image.svg').cookie.includes('shared-login=present'),'source image used source cookie');
   assert.equal(await compatibility.locator('#remote-image').getAttribute('src').then(s=>s.startsWith('blob:')),true,'visitor uses relay blob, never original URL');
   assert.equal(await compatibility.locator('#badge').evaluate(e=>getComputedStyle(e,'::before').content),'"★"','pseudo element content');

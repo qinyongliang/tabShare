@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -120,7 +121,12 @@ type peer struct {
 	direct       bool
 	lastRTCRetry time.Time
 	conn         *websocket.Conn
-	queue        chan Message
+	queue        chan []byte
+	queueMu      sync.Mutex
+	queueBytes   int
+	closed       bool
+	ctx          context.Context
+	owner        *Server
 	cancel       context.CancelFunc
 }
 type live struct {
@@ -136,6 +142,7 @@ type live struct {
 }
 type Server struct {
 	mu          sync.Mutex
+	persistMu   sync.Mutex
 	cfg         Config
 	token       string
 	sessions    map[string]*Session
@@ -143,6 +150,7 @@ type Server struct {
 	live        map[string]*live
 	assets      map[string]*assetBlob
 	assetBytes  int
+	queuedBytes atomic.Int64
 	turn        *builtinTURN
 	turnViewers map[string]bool
 }
@@ -213,8 +221,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	return s, nil
 }
-func (s *Server) persist() error {
-	b, err := json.MarshalIndent(s.sessions, "", "  ")
+func (s *Server) persist(sessions map[string]*Session) error {
+	b, err := json.MarshalIndent(sessions, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -228,6 +236,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonResponse(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("/api/sessions", s.api)
+	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("DELETE /api/sessions/{id}", s.remove)
 	mux.HandleFunc("OPTIONS /api/sessions/{id}", s.api)
 	mux.HandleFunc("/api/resources/{id}/{asset}", s.resource)
@@ -286,16 +295,23 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing token required", 401)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if r.Method == "GET" {
-		jsonResponse(w, 200, s.sessions)
+		s.mu.Lock()
+		items := make(map[string]*Session, len(s.sessions))
+		for id, session := range s.sessions {
+			copy := *session
+			items[id] = &copy
+		}
+		s.mu.Unlock()
+		jsonResponse(w, 200, items)
 		return
 	}
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = http.NewResponseController(w).SetReadDeadline(time.Time{}) }()
 	var req Session
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
 	dec.DisallowUnknownFields()
@@ -317,25 +333,40 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "target too long", 400)
 		return
 	}
+	s.persistMu.Lock()
+	s.mu.Lock()
 	for _, old := range s.sessions {
 		if old.AgentID == req.AgentID && old.Kind == req.Kind && ((req.Kind == "url" && old.URL == req.URL) || (req.Kind == "tab" && old.TabID == req.TabID && old.TabEpoch == req.TabEpoch)) {
+			s.mu.Unlock()
+			s.persistMu.Unlock()
 			jsonResponse(w, 200, map[string]any{"session": old, "shareUrl": s.cfg.PublicURL + "/s/" + old.ID + "#" + old.Key})
 			return
 		}
 	}
 	if len(s.sessions) >= 1000 {
+		s.mu.Unlock()
+		s.persistMu.Unlock()
 		http.Error(w, "session limit reached", 429)
 		return
 	}
 	req.ID = randomID()
 	req.Key = randomID()
-	s.sessions[req.ID] = &req
-	if err = s.persist(); err != nil {
-		delete(s.sessions, req.ID)
+	items := make(map[string]*Session, len(s.sessions)+1)
+	for id, session := range s.sessions {
+		items[id] = session
+	}
+	items[req.ID] = &req
+	s.mu.Unlock()
+	if err = s.persist(items); err != nil {
+		s.persistMu.Unlock()
 		http.Error(w, "could not save session", 500)
 		return
 	}
+	s.mu.Lock()
+	s.sessions = items
 	s.live[req.ID] = &live{viewers: map[*peer]bool{}, status: "waiting"}
+	s.mu.Unlock()
+	s.persistMu.Unlock()
 	jsonResponse(w, 201, map[string]any{"session": &req, "shareUrl": s.cfg.PublicURL + "/s/" + req.ID + "#" + req.Key})
 }
 func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
@@ -343,31 +374,54 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pairing token required", 401)
 		return
 	}
+	s.persistMu.Lock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	id := r.PathValue("id")
 	se := s.sessions[id]
 	if se == nil {
+		s.mu.Unlock()
+		s.persistMu.Unlock()
 		http.NotFound(w, r)
 		return
 	}
-	delete(s.sessions, id)
-	if err := s.persist(); err != nil {
-		s.sessions[id] = se
+	items := make(map[string]*Session, len(s.sessions))
+	for key, session := range s.sessions {
+		if key != id {
+			items[key] = session
+		}
+	}
+	s.mu.Unlock()
+	if err := s.persist(items); err != nil {
+		s.persistMu.Unlock()
 		http.Error(w, "could not revoke session", 500)
 		return
 	}
+	s.mu.Lock()
+	s.sessions = items
 	if a := s.agents[se.AgentID]; a != nil {
 		send(a, Message{Type: "pause", SessionID: id})
 	}
+	var viewers []*peer
 	for p := range s.live[id].viewers {
+		viewers = append(viewers, p)
+		delete(s.turnViewers, p.id)
+	}
+	s.clearAssets(s.live[id])
+	if len(viewers) == 0 {
+		delete(s.live, id)
+	}
+	s.mu.Unlock()
+	s.persistMu.Unlock()
+	for _, p := range viewers {
+		if s.turn != nil {
+			s.turn.revoke(p.id)
+		}
 		p.cancel()
 		_ = p.conn.CloseNow()
 	}
-	s.clearAssets(s.live[id])
-	// Keep the live object until existing viewer cleanup has finished.
 	w.WriteHeader(204)
 }
+
 func (s *Server) accept(w http.ResponseWriter, r *http.Request, agent bool) (*websocket.Conn, error) {
 	origin := r.Header.Get("Origin")
 	if agent {
@@ -382,7 +436,7 @@ func (s *Server) accept(w http.ResponseWriter, r *http.Request, agent bool) (*we
 		}
 	}
 	// Origin is checked above against the configured external origin, including behind TLS proxies.
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionDisabled})
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true, CompressionMode: websocket.CompressionNoContextTakeover, CompressionThreshold: 4096})
 	if err == nil {
 		if agent {
 			c.SetReadLimit(4 << 20)
@@ -399,26 +453,48 @@ func first(c *websocket.Conn, r *http.Request) (Message, error) {
 	err := wsjson.Read(ctx, c, &m)
 	return m, err
 }
-func newPeer(c *websocket.Conn, r *http.Request) *peer {
+func newPeer(c *websocket.Conn, r *http.Request, owner *Server) *peer {
 	ctx, cancel := context.WithCancel(r.Context())
-	p := &peer{id: randomID(), conn: c, queue: make(chan Message, 128), cancel: cancel}
+	p := &peer{id: randomID(), conn: c, queue: make(chan []byte, 128), cancel: cancel, ctx: ctx, owner: owner}
 	go func() {
 		defer cancel()
 		defer c.CloseNow()
+		defer func() {
+			p.queueMu.Lock()
+			defer p.queueMu.Unlock()
+			p.closed = true
+			p.owner.queuedBytes.Add(-int64(p.queueBytes))
+			p.queueBytes = 0
+			for {
+				select {
+				case <-p.queue:
+				default:
+					return
+				}
+			}
+		}()
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
-			var m Message
+			var data []byte
+			queued := false
 			select {
 			case <-ctx.Done():
 				return
-			case m = <-p.queue:
+			case data = <-p.queue:
+				queued = true
 			case <-ticker.C:
-				m = Message{Type: "ping"}
+				data = []byte(`{"type":"ping"}`)
 			}
 			writeCtx, done := context.WithTimeout(ctx, 5*time.Second)
-			err := wsjson.Write(writeCtx, c, m)
+			err := c.Write(writeCtx, websocket.MessageText, data)
 			done()
+			if queued {
+				p.queueMu.Lock()
+				p.queueBytes -= len(data)
+				p.owner.queuedBytes.Add(-int64(len(data)))
+				p.queueMu.Unlock()
+			}
 			if err != nil {
 				return
 			}
@@ -426,21 +502,59 @@ func newPeer(c *websocket.Conn, r *http.Request) *peer {
 	}()
 	return p
 }
-func send(p *peer, m Message) {
-	select {
-	case p.queue <- m:
-	default:
-		// Slow consumers reconnect with a fresh DOM state instead of losing deltas or input.
+func (s *Server) reserveQueue(bytes int) bool {
+	for {
+		current := s.queuedBytes.Load()
+		if current+int64(bytes) > 64<<20 {
+			return false
+		}
+		if s.queuedBytes.CompareAndSwap(current, current+int64(bytes)) {
+			return true
+		}
+	}
+}
+func sendPacket(p *peer, data []byte) {
+	p.queueMu.Lock()
+	if p.closed || p.ctx.Err() != nil {
+		p.queueMu.Unlock()
+		return
+	}
+	accepted := false
+	if p.queueBytes+len(data) <= 8<<20 {
+		if p.owner.reserveQueue(len(data)) {
+			select {
+			case p.queue <- data:
+				p.queueBytes += len(data)
+				accepted = true
+			default:
+			}
+			if !accepted {
+				p.owner.queuedBytes.Add(-int64(len(data)))
+			}
+		}
+	}
+	p.queueMu.Unlock()
+	if !accepted {
 		p.cancel()
 		_ = p.conn.CloseNow()
 	}
 }
+func send(p *peer, m Message) {
+	data, err := json.Marshal(m)
+	if err == nil {
+		sendPacket(p, data)
+	}
+}
 func (s *Server) broadcast(id string, m Message) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
 	for p := range s.live[id].viewers {
 		if p.direct && (m.Type == "dom" || m.Type == "raster" || m.Type == "resource" || m.Type == "resources") {
 			continue
 		}
-		send(p, m)
+		sendPacket(p, data)
 	}
 }
 func safeSession(s *Session) *Session { copy := *s; copy.Key = ""; return &copy }
@@ -456,7 +570,7 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := m.AgentID
-	p := newPeer(c, r)
+	p := newPeer(c, r, s)
 	defer p.cancel()
 	s.mu.Lock()
 	if old := s.agents[id]; old != nil {
@@ -520,6 +634,14 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 						send(viewer, Message{Type: "signal", Signal: m.Signal})
 						break
 					}
+				}
+			}
+		case "peer-drop":
+			for viewer := range s.live[se.ID].viewers {
+				if viewer.id == m.ViewerID {
+					viewer.cancel()
+					_ = viewer.conn.CloseNow()
+					break
 				}
 			}
 		case "peer-retry":
@@ -606,7 +728,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		_ = c.Close(websocket.StatusTryAgainLater, "viewer limit reached")
 		return
 	}
-	p := newPeer(c, r)
+	p := newPeer(c, r, s)
 	defer p.cancel()
 	l.viewers[p] = true
 	s.turnViewers[p.id] = true
@@ -659,6 +781,9 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 			if a := s.agents[se.AgentID]; a != nil {
 				send(a, Message{Type: "pause", SessionID: id})
 			}
+			if s.sessions[id] == nil {
+				delete(s.live, id)
+			}
 		}
 	}()
 	tokens := float64(200)
@@ -684,6 +809,10 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if m.Type == "signal" && validSignal(m.Signal) {
 			s.mu.Lock()
+			if s.sessions[id] != se {
+				s.mu.Unlock()
+				return
+			}
 			if a := s.agents[se.AgentID]; a != nil {
 				send(a, Message{Type: "signal", SessionID: id, ViewerID: p.id, Signal: m.Signal})
 			}
@@ -692,6 +821,10 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if m.Type == "resync" {
 			s.mu.Lock()
+			if s.sessions[id] != se {
+				s.mu.Unlock()
+				return
+			}
 			if a := s.agents[se.AgentID]; a != nil {
 				send(a, Message{Type: "resync", SessionID: id})
 			}
@@ -702,13 +835,15 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.mu.Lock()
+		if s.sessions[id] != se {
+			s.mu.Unlock()
+			return
+		}
 		if a := s.agents[se.AgentID]; a != nil {
 			if m.Type == "retry" {
 				send(a, Message{Type: "open", Session: safeSession(se)})
 			} else {
-				if m.Input.Action == "viewport" || m.Input.Action == "restoreViewport" {
-					m.Input.ViewerID = p.id
-				}
+				m.Input.ViewerID = p.id
 				send(a, Message{Type: "input", SessionID: id, Input: m.Input})
 			}
 		}

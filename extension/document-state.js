@@ -9,7 +9,7 @@ export class DocumentState {
       this.nodes.set(u.id,node);
     }
     for(const id of d.removes||[])this.nodes.delete(id);
-    this.meta=d.meta;this.version=d.version;this.sequence=d.sequence;this.root=d.root;if(d.reset||d.css)this.css=d.css;
+    this.meta=d.meta;this.version=d.version;this.sequence=d.sequence;this.root=d.root;if(d.reset||d.cssChanged||d.css!=null)this.css=d.css||'';
   }
   snapshot(){return this.version?{reset:true,version:this.version,sequence:this.sequence,root:this.root,meta:this.meta,css:this.css||'',nodes:[...this.nodes.values()],updates:[],removes:[]}:null;}
 }

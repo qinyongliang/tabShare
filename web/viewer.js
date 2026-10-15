@@ -4,11 +4,11 @@ import {Resources} from './resources.js';
 import {displayLayout,sourcePoint,viewportSize,wheelPixels} from './display.js';
 const $ = id => document.getElementById(id);
 const id=location.pathname.split('/')[2], key=location.hash.slice(1);
-let ws,retry,stopped=false,connected=false,mirror,applying=false,pending=[],scrollTimer,scrollNode,scrollRoot=false,full=false,modeKnown=false;
+let ws,retry,stopped=false,connected=false,mirror,pending=[],scrollTimer,scrollNode,scrollRoot=false,full=false,modeKnown=false;
 const frame=$('mirror');
 let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTimer,lastRegionFrame;
 const video=document.getElementById('stream');
-const resources=new Resources(id,key,()=>mirror?.refreshResources());
+const resources=new Resources(id,key,ids=>mirror?.refreshResources(ids));
 let sourceMode='dom',activeDialog,viewerId,following=false,viewportTimer,lastViewport,queuedViewport,fitFrame,layout;
 let display={mode:'fit',zoom:1};
 try{const saved=JSON.parse(localStorage.getItem('tabshare-display:'+id));if(saved&&['fit','width','actual','custom'].includes(saved.mode)&&Number.isFinite(saved.zoom))display={mode:saved.mode,zoom:Math.max(.25,Math.min(2,saved.zoom))};}catch{}
@@ -47,11 +47,11 @@ function drawRegions(){
   if(!full&&mirror&&videoInfo.version===mirror.version){
     const signature=video.getVideoPlaybackQuality().totalVideoFrames+':'+JSON.stringify(videoInfo)+':'+mirror.sequence;
     if(signature===lastRegionFrame)return;lastRegionFrame=signature;
-    const info=videoInfo,sx=video.videoWidth/info.width,sy=video.videoHeight/info.height;
+    const info=videoInfo,sx=video.videoWidth/(info.frameWidth||info.width),sy=video.videoHeight/(info.frameHeight||info.height);
     for(const region of info.regions||[]){const node=mirror.nodes.get(region.id);if(!node)continue;
       let canvas=node.querySelector('canvas[data-raster]');if(!canvas){node.replaceChildren();canvas=mirror.doc.createElement('canvas');canvas.dataset.raster='true';canvas.style.cssText='display:block;width:100%;height:100%;object-fit:fill';node.append(canvas);}
       const w=Math.max(1,Math.round(region.width*sx)),h=Math.max(1,Math.round(region.height*sy));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
-      canvas.getContext('2d',{alpha:false}).drawImage(video,(region.x-info.scrollX)*sx,(region.y-info.scrollY)*sy,region.width*sx,region.height*sy,0,0,w,h);
+      canvas.getContext('2d',{alpha:false}).drawImage(video,(region.videoX??region.x-info.scrollX)*sx,(region.videoY??region.y-info.scrollY)*sy,(region.videoWidth??region.width)*sx,(region.videoHeight??region.height)*sy,0,0,w,h);
     }
   }
 }
@@ -63,16 +63,23 @@ async function signaling(s){
     const link=new PeerLink({attempt:s.attempt,iceServers:rtcServers,signal:value=>send({type:'signal',signal:value}),
       message:(m,channel)=>{if(channel==='state')receive(m,true);},asset:(meta,bytes)=>void resources.add(meta,bytes),
       track:stream=>{video.srcObject=stream;void video.play().catch(()=>{});},
-      state:status=>{if(peer!==link)return;peerReady=status==='up';if(peerReady){void link.route().then(value=>{route=value;notify('已连接 · '+route,true);});resync();}else{route='WebSocket 兜底';updateVideo();send({type:'resync'});}}
+      state:status=>{if(peer!==link)return;peerReady=status==='up';if(peerReady){void link.route().then(value=>{route=value;notify('已连接 · '+route,true);});resync();sendProfile();}else{route='WebSocket 兜底';updateVideo();send({type:'resync'});}}
     });peer=link;
   }
   if(peer?.attempt===s.attempt)await peer.accept(s);
 }
-let rtcServers=[],viewportOwner;
+let rtcServers=[],viewportOwner,lastProfile;
+function sendProfile(){
+  if(!peerReady||!peer)return;
+  const box=$('surface').getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+  const profile={width:Math.max(1,Math.min(4096,Math.ceil((videoInfo?.frameWidth&&layout?videoInfo.frameWidth*layout.scale:box.width)*dpr))),height:Math.max(1,Math.min(4096,Math.ceil((videoInfo?.frameHeight&&layout?videoInfo.frameHeight*layout.scale:box.height)*dpr))),visible:document.visibilityState!=='hidden'};
+  const signature=peer.attempt+JSON.stringify(profile);if(signature===lastProfile)return;lastProfile=signature;void peer.send({type:'peer-profile',profile},'input');
+}
+document.addEventListener('visibilitychange',sendProfile);
 function receive(m,direct=false){
   if(!direct&&peerReady&&['dom','raster','resource','resources'].includes(m.type))return;
   if(m.type==='signal'){if(typeof RTCPeerConnection==='function')void signaling(m.signal).catch(()=>{route='WebSocket 兜底';});return;}
-  if(m.type==='video'){videoInfo=m.info;full=!!m.info.full;frame.hidden=full;$('fallback').hidden=!full;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();return;}
+  if(m.type==='video'){videoInfo=m.info;full=!!m.info.full;frame.hidden=full;$('fallback').hidden=!full;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();sendProfile();return;}
   if(m.type==='ice')rtcServers=m.iceServers||[];
   if(m.type==='joined'){viewerId=m.viewerId;rtcServers=m.iceServers||[];lastViewport=null;queueViewport();}
   if(m.type==='viewport')sharedViewport(m.viewport);
@@ -127,21 +134,19 @@ function fit(){
   const percent=Math.round(layout.scale*100);$('display-percent').value=percent+'%';
   $('display-zoom').value=String(Math.max(25,Math.min(200,percent)));
   const text='共享视口 '+width+' × '+height+' · 显示 '+percent+'%';if($('display-info').textContent!==text)$('display-info').textContent=text;
-  queueViewport();
+  queueViewport();sendProfile();
 }
 function render(delta){
   if(!mirror){pending.push(delta);return;}
-  applying=true;
   if(delta.reset&&delta.version!==mirror.version)resources.keepVersion(delta.version);
   const oldMeta=mirror.meta;
-  if(!mirror.apply(delta)){resync();applying=false;return;}
+  if(!mirror.apply(delta)){resync();return;}
   connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;fit();
   const meta=delta.meta||{};modeSettings(meta.mode);
   if(meta.url&&document.activeElement!==$('address'))$('address').value=meta.url;
   if(meta.title)document.title=meta.title+' · TabShare';
   if(delta.reset||meta.scrollX!==oldMeta?.scrollX||meta.scrollY!==oldMeta?.scrollY)frame.contentWindow.scrollTo(meta.scrollX||0,meta.scrollY||0);
   notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);
-  requestAnimationFrame(()=>{applying=false;});
 }
 function connect(){
   if(stopped)return;
@@ -188,7 +193,7 @@ function attach(){
   },true);
   doc.addEventListener('keyup',e=>{if(composing||e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;input({action:'keyUp',key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});},true);
   doc.addEventListener('paste',e=>{e.preventDefault();const text=e.clipboardData.getData('text/plain').slice(0,8192);if(text){const selected=selection(e.target),element=e.target;if(typeof element.setRangeText==='function'){element.setRangeText(text,element.selectionStart,element.selectionEnd,'end');mirror.localEdit(element);}input({action:'text',text,...selected});}},true);
-  doc.addEventListener('change',e=>{if(!applying&&e.target.tagName==='SELECT')input({action:'select',nodeId:e.target.dataset.nodeId,text:e.target.value,values:[...e.target.selectedOptions].map(o=>o.value)});},true);
+  doc.addEventListener('change',e=>{if(e.target.tagName==='SELECT')input({action:'select',nodeId:e.target.dataset.nodeId,text:e.target.value,values:[...e.target.selectedOptions].map(o=>o.value)});},true);
   doc.addEventListener('scroll',e=>{
     const root=e.target===doc;scrollNode=root?doc.scrollingElement:e.target;scrollRoot=root;clearTimeout(scrollTimer);
     scrollTimer=setTimeout(()=>{if(scrollRoot&&scrollNode.scrollTop===(mirror.meta.scrollY||0)&&scrollNode.scrollLeft===(mirror.meta.scrollX||0))return;input({action:'scroll',nodeId:scrollRoot?'root':scrollNode.dataset.nodeId,scrollTop:scrollNode.scrollTop,scrollLeft:scrollNode.scrollLeft});},100);

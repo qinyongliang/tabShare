@@ -12,8 +12,21 @@ test('late join cache merges styles, deleted attributes, children and CSS withou
  const state=new DocumentState();state.apply({reset:true,version:'v1',sequence:1,root:'a',meta:{width:100},css:'.a{}',nodes:[{id:'a',attrs:{title:'old'},style:{color:'red',width:'10px'},children:['b']},{id:'b',text:'old'}]});
  const before=state.snapshot();state.apply({version:'v1',sequence:2,root:'a',meta:{width:200},css:'.b{}',nodes:[{id:'c',text:'new'}],updates:[{id:'a',changes:{style:{color:'blue',width:null},attrs:{title:null},children:['c']}}],removes:['b']});
  const after=state.snapshot();assert.deepEqual(after.nodes.map(n=>n.id),['a','c']);assert.deepEqual(after.nodes[0].style,{color:'blue'});assert.deepEqual(after.nodes[0].attrs,{});assert.equal(after.css,'.b{}');assert.equal(after.sequence,2);assert.equal(before.nodes[0].style.color,'red');assert.equal(before.nodes[0].attrs.title,'old');
+ state.apply({version:'v1',sequence:3,root:'a',updates:[],css:'',cssChanged:true});assert.equal(state.snapshot().css,'','late joins retain CSS deletion');
  state.apply({reset:true,version:'v2',sequence:1,root:'z',nodes:[{id:'z'}],meta:{width:300}});assert.deepEqual(state.snapshot().nodes,[{id:'z'}]);
 });
 test('extension and viewer ship the same peer protocol',async()=>{
  assert.equal(await readFile(new URL('../extension/peer.js',import.meta.url),'utf8'),await readFile(new URL('../web/peer.js',import.meta.url),'utf8'));
+});
+
+test('large JSON packets compress losslessly with a bounded decoder',async()=>{
+ const {compressPacket,decodeJSONPacket}=await import('../extension/peer.js');
+ const message={type:'dom',nodes:Array.from({length:500},(_,i)=>({id:String(i),style:{color:'rgb(1,2,3)',width:'100px',display:'block'}}))};
+ const json=new TextEncoder().encode(JSON.stringify(message)),bytes=new Uint8Array(json.length+1);bytes[0]=1;bytes.set(json,1);
+ const packed=await compressPacket(bytes);assert.equal(packed[0],3);assert.ok(packed.length<bytes.length/4);
+ assert.deepEqual(await decodeJSONPacket(packed),message);
+ await assert.rejects(decodeJSONPacket(packed,100),/budget/);
+ const wrong=packed.slice();new DataView(wrong.buffer).setUint32(1,100);await assert.rejects(decodeJSONPacket(wrong),/budget|length/);
+ const corrupt=packed.slice();corrupt.fill(0,5);await assert.rejects(decodeJSONPacket(corrupt));
+ const small=new Uint8Array([1,...new TextEncoder().encode('{"type":"input"}')]);assert.equal(await compressPacket(small),small);
 });

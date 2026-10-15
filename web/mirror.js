@@ -1,11 +1,11 @@
 const tags = new Set('a abbr address article aside b bdi bdo blockquote br button caption code col colgroup data datalist dd del details dfn dialog div dl dt em fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr i img input kbd label legend li main mark menu meter nav ol optgroup option output p picture pre progress q rp rt ruby s samp section select small source span strong sub summary sup table tbody td textarea tfoot th thead time tr u ul var wbr'.split(' '));
 const attrs = new Set('id for open aria-expanded aria-label aria-labelledby aria-describedby type placeholder title alt role colspan rowspan maxlength min max step size multiple disabled readonly required name value lang dir popover'.split(' '));
 export class Mirror {
-  constructor(doc,resources) { this.doc = doc;this.resources=resources; this.nodes = new Map();this.states=new Map();this.localValues=new Map(); this.version = null;this.css=""; }
+  constructor(doc,resources) { this.doc = doc;this.resources=resources; this.nodes = new Map();this.states=new Map();this.localValues=new Map();this.resourceUsers=new Map();this.nodeResources=new Map();this.topLayers=new Set(); this.version = null;this.css=""; }
   apply(delta) {
     if (!delta.reset && delta.version !== this.version) return false;
-    if (delta.reset) { this.nodes.clear();this.states.clear();this.localValues.clear(); this.doc.body.replaceChildren(); this.version = delta.version; this.doc.head.querySelectorAll('style').forEach(n => n.remove()); }
-    if(delta.reset||delta.css!=null){this.css=delta.css||'';this.stylesheet();}
+    if (delta.reset) { this.nodes.clear();this.states.clear();this.localValues.clear();this.resourceUsers.clear();this.nodeResources.clear();this.topLayers.clear(); this.doc.body.replaceChildren(); this.version = delta.version; this.doc.head.querySelectorAll('style').forEach(n => n.remove()); }
+    if(delta.reset||delta.cssChanged||delta.css!=null){this.css=delta.css||'';this.stylesheet();}
     const added = delta.nodes || [];
     for (const data of added) {
       if (this.nodes.has(data.id)) continue;
@@ -17,7 +17,7 @@ export class Mirror {
     for (const {id, changes} of delta.updates || []) { const node = this.nodes.get(id); if (node) this.properties(node, changes); }
     for (const data of added) if (data.children) this.children(this.nodes.get(data.id), data.children);
     for (const {id, changes} of delta.updates || []) if (changes.children) this.children(this.nodes.get(id), changes.children);
-    for (const id of delta.removes || []) { const node=this.nodes.get(id);if(node!==this.doc.body)node?.remove();this.nodes.delete(id);this.states.delete(id);this.doc.getElementById("ts-pseudo-"+id)?.remove(); }
+    for (const id of delta.removes || []) { const node=this.nodes.get(id);if(node!==this.doc.body)node?.remove();this.nodes.delete(id);this.states.delete(id);this.localValues.delete(id);this.indexResources(id,null);this.topLayers.delete(id);this.doc.getElementById("ts-pseudo-"+id)?.remove(); }
     for (const data of [...added, ...(delta.updates || []).map(x => ({id: x.id, ...x.changes}))]) {
       const node = this.nodes.get(data.id);
       if (node?.nodeType === 1) {
@@ -25,14 +25,18 @@ export class Mirror {
         if (typeof data.scrollLeft === 'number' && Math.abs(node.scrollLeft - data.scrollLeft) > 2) node.scrollLeft = data.scrollLeft;
       }
     }
-    for(const [id,state] of this.states){const n=this.nodes.get(id);if(n?.isConnected&&n.nodeType===1){if(n.tagName==='DIALOG'&&typeof state.modal==='boolean'){if(state.modal&&!n.matches(':modal')){n.removeAttribute('open');try{n.showModal();}catch{}}else if(!state.modal&&n.matches(':modal'))n.close();}if(typeof state.popoverOpen==='boolean')try{if(state.popoverOpen&&!n.matches(':popover-open'))n.showPopover();else if(!state.popoverOpen&&n.matches(':popover-open'))n.hidePopover();}catch{}}}
+    for(const id of this.topLayers){const state=this.states.get(id);const n=this.nodes.get(id);if(n?.isConnected&&n.nodeType===1){if(n.tagName==='DIALOG'&&typeof state.modal==='boolean'){if(state.modal&&!n.matches(':modal')){n.removeAttribute('open');try{n.showModal();}catch{}}else if(!state.modal&&n.matches(':modal'))n.close();}if(typeof state.popoverOpen==='boolean')try{if(state.popoverOpen&&!n.matches(':popover-open'))n.showPopover();else if(!state.popoverOpen&&n.matches(':popover-open'))n.hidePopover();}catch{}}}
     this.meta = delta.meta;this.sequence=delta.sequence;
     return true;
   }
   properties(node, data,remember=true) {
     if (!node) return;
     const id=data.id||node.dataset?.nodeId;
-    if(remember&&id){const old=this.states.get(id)||{};this.states.set(id,{...old,...data,style:{...old.style,...data.style},attrs:{...old.attrs,...data.attrs}});}
+    if(remember&&id){
+      const old=this.states.get(id)||{},state={...old,...data,style:{...old.style,...data.style},attrs:{...old.attrs,...data.attrs}};this.states.set(id,state);
+      if(data.style||data.attrs||data.pseudos)this.indexResources(id,state);
+      if(typeof state.modal==='boolean'||typeof state.popoverOpen==='boolean')this.topLayers.add(id);
+    }
     if (node.nodeType === 3) { if (data.text != null && node.textContent !== data.text) node.textContent = data.text; return; }
     for (const [name, value] of Object.entries(data.style || {})) {
       if (value == null) node.style.removeProperty(name);
@@ -77,7 +81,27 @@ export class Mirror {
     let style=this.doc.getElementById('ts-pseudo-'+id);if(!style){style=this.doc.createElement('style');style.id='ts-pseudo-'+id;this.doc.head.append(style);}style.textContent='';
     for(const [pseudo,props] of Object.entries(values)){if(!['::before','::after','::backdrop'].includes(pseudo))continue;const i=style.sheet.insertRule('[data-node-id="'+id+'"]'+pseudo+' {}');const rule=style.sheet.cssRules[i];for(const [name,value] of Object.entries(props)){const safe=this.safeStyle(value);if(safe!==null)rule.style.setProperty(name,safe);}}
   }
-  refreshResources() {this.stylesheet();for(const [id,state] of this.states)this.properties(this.nodes.get(id),state,false);}
+  assetIDs(value) {return new Set(String(value||'').match(/ts-asset:[A-Za-z0-9_-]+/g)?.map(v=>v.slice(9))||[]);}
+  indexResources(id,state) {
+    for(const asset of this.nodeResources.get(id)||[]){const users=this.resourceUsers.get(asset);users?.delete(id);if(!users?.size)this.resourceUsers.delete(asset);}
+    const assets=state?this.assetIDs(JSON.stringify([state.style,state.attrs,state.pseudos])):new Set();
+    if(!assets.size){this.nodeResources.delete(id);return;}
+    this.nodeResources.set(id,assets);
+    for(const asset of assets){if(!this.resourceUsers.has(asset))this.resourceUsers.set(asset,new Set());this.resourceUsers.get(asset).add(id);}
+  }
+  refreshResources(changed) {
+    const assets=new Set(changed||this.resourceUsers.keys()),affected=new Set();
+    if([...this.assetIDs(this.css)].some(id=>assets.has(id)))this.stylesheet();
+    for(const asset of assets)for(const id of this.resourceUsers.get(asset)||[])affected.add(id);
+    const uses=value=>[...this.assetIDs(value)].some(id=>assets.has(id));
+    for(const id of affected){
+      const state=this.states.get(id),node=this.nodes.get(id);if(!state||!node)continue;
+      const data={id};
+      for(const field of ['style','attrs']){const entries=Object.entries(state[field]||{}).filter(([,value])=>uses(value));if(entries.length)data[field]=Object.fromEntries(entries);}
+      if(uses(JSON.stringify(state.pseudos)))data.pseudos=state.pseudos;
+      this.properties(node,data,false);
+    }
+  }
   children(parent, ids) {
     if (!parent) return;
     const desired = ids.map(id => this.nodes.get(id)).filter(Boolean);

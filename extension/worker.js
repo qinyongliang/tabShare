@@ -1,3 +1,4 @@
+import {InputQueue} from './input-queue.js';
 import {DocumentState} from './document-state.js';
 import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame, validPeerInput} from './controller.js';
 import {installDOM, captureDOM} from './dom-capture.js';
@@ -27,24 +28,27 @@ function publish(message) {
   return true;
 }
 function resourceConfig(){return {server:serverOrigin(config.server),pairingToken:config.pairingToken,deliver:async(id,asset,item)=>{
-  for(const p of roomPeers(id).filter(p=>p.direct)){
-    const sent=id+':'+p.viewerId;if(item.sent.has(sent))continue;
+  const members=roomPeers(id),recipients=members.filter(p=>p.direct&&!item.sent.has(id+':'+p.viewerId));
+  let sentBytes=0;
+  if(recipients.length){
+    if(!item.sha256)item.sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',item.bytes)),n=>n.toString(16).padStart(2,'0')).join('');
     let raw='';for(let n=0;n<item.bytes.length;n+=4096)raw+=String.fromCharCode(...item.bytes.subarray(n,n+4096));
-    const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',item.bytes)),n=>n.toString(16).padStart(2,'0')).join('');
-    const ok=await offscreen({type:'asset',sessionId:id,viewerId:p.viewerId,meta:{id:asset,mime:item.mime,size:item.bytes.length,sha256},data:btoa(raw)});
-    if(ok)item.sent.add(sent);
+    const delivered=await offscreen({type:'asset',sessionId:id,viewerIds:recipients.map(p=>p.viewerId),meta:{id:asset,mime:item.mime,size:item.bytes.length,sha256:item.sha256},data:btoa(raw)});
+    for(const viewerId of Array.isArray(delivered)?delivered:[]){item.sent.add(id+':'+viewerId);sentBytes+=item.bytes.length;}
   }
-  return !roomPeers(id).length||roomPeers(id).some(p=>!p.direct);
+  return {relay:!members.length||members.some(p=>!p.direct),sentBytes};
 }};}
 async function peerJoined(m) {
   const binding=bindings.get(m.sessionId);if(!binding)return;
   peers.set(m.sessionId+':'+m.viewerId,{...m,direct:false});
-  await offscreen({...m,tabId:binding.tabId});
+  const ok=await offscreen({...m,tabId:binding.tabId}).catch(()=>false);
+  if(chrome.offscreen&&!ok)await peerState({...m,status:'down'});
 }
 async function peerLeft(m) {
   peers.delete(m.sessionId+':'+m.viewerId);
   await offscreen({...m,type:'peer-left'}).catch(()=>{});
   const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);
+  for(const item of t?.resources?.done.values()||[])item.sent?.delete(m.sessionId+':'+m.viewerId);
   if(t?.viewport?.owner===m.viewerId)await resizeViewport(b.tabId,null);
 }
 async function peerState(m) {
@@ -66,8 +70,21 @@ function peerInput(m) {
   if(m.message?.type==='resync'){if(now-(p.lastResync||0)>1000){p.lastResync=now;schedule(()=>peerSnapshot(m.sessionId,m.viewerId));}return;}
   if(m.message?.type!=='input'||!validPeerInput(m.message.input))return;
   const input={...m.message.input,viewerId:m.viewerId};
-  const run=()=>control({sessionId:m.sessionId,input}).catch(error=>status(m.sessionId,'error',error.message));
-  if(input.action==='dialog')void run();else schedule(run);
+  void enqueueInput({sessionId:m.sessionId,input});
+}
+function enqueueInput(message){
+  const binding=bindings.get(message.sessionId),target=binding&&targets.get(binding.tabId);if(!target)return;
+  const member=peers.has(message.sessionId+':'+message.input.viewerId);
+  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{return await control(message);}catch(error){if(bindings.get(message.sessionId)===binding)status(message.sessionId,'error',error.message);}};
+  if(message.input.action==='dialog')return run();
+  target.inputs??=new InputQueue();
+  const key=message.input.action==='mouseMoved'?'move:'+message.input.viewerId:null;
+  const coalesced=key&&target.inputs.pending.at(-1)?.key===key,job=target.inputs.push(run,key);
+  if(coalesced)return job;
+  return job.catch(()=>{
+    const viewerId=message.input.viewerId;if(!viewerId)return;
+    transmit({type:'peer-drop',sessionId:message.sessionId,viewerId});void peerLeft({sessionId:message.sessionId,viewerId});
+  });
 }
 async function peerSnapshot(sessionId,viewerId) {
   const b=bindings.get(sessionId),t=b&&targets.get(b.tabId),p=peers.get(sessionId+':'+viewerId);if(!t||!p)return;
@@ -83,7 +100,7 @@ async function backgroundVideo(tabId) {
   t.frameBusy=true;
   try{
     const {data}=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});
-    const changed=data!==t.lastShot;t.videoIdleDelay=changed?33:Math.min(500,(t.videoIdleDelay||33)*1.5);t.lastShot=data;
+    const changed=data!==t.lastShot;t.videoIdleDelay=changed?1000/(t.videoFPS||30):Math.min(1000,(t.videoIdleDelay||33)*1.5);t.lastShot=data;
     if(changed&&t.streaming)await offscreen({type:'frame',tabId,data});t.nextVideo=Date.now()+t.videoIdleDelay;
   }catch{/* An inactive/new tab can temporarily have no compositor surface. */}finally{t.frameBusy=false;}
 }
@@ -92,7 +109,7 @@ async function videoState(tabId,active) {
   t.streaming=active;
   if(nativeTabs.has(tabId)){await offscreen({type:'active-video',tabId,active});return;}
   if(active)try{
-    await command(tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:1});
+    await command(tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:Math.max(1,Math.round(30/(t.videoFPS||30)))});
     // A newly opened background tab may not have produced its first compositor frame yet.
     if(!t.frameBusy){t.frameBusy=true;try{const seed=await command(tabId,'Page.captureScreenshot',{format:'jpeg',quality:80,fromSurface:true,captureBeyondViewport:false});if(t.streaming){t.lastShot=seed.data;await offscreen({type:'frame',tabId,data:seed.data});}}finally{t.frameBusy=false;}}
   }catch{t.streaming=false;}
@@ -145,8 +162,7 @@ async function connect() {
  if(message.type==='signal')void offscreen(message).catch(()=>{});
         if (message.type === 'input') {
           // Commands from all viewers execute in the same order on this browser.
-          const run=()=>control(message).catch(error=>status(message.sessionId,'error',error.message));
-          if(message.input?.action==='dialog')void run();else schedule(run);
+          void enqueueInput(message);
         }
       };
       ws.onclose = () => {
@@ -181,7 +197,7 @@ async function world(tabId) {
 }
 async function evaluate(tabId, expression) {
   const target = targets.get(tabId);
-  const result = await command(tabId, 'Runtime.evaluate', {expression, contextId: target.contextId, returnByValue: true, userGesture: true});
+  const result = await command(tabId, 'Runtime.evaluate', {expression, contextId: target.contextId, returnByValue: true, userGesture: true, timeout:2000});
   if (result.exceptionDetails) throw new Error(result.result?.description || result.exceptionDetails.text);
   return result.result.value;
 }
@@ -198,12 +214,18 @@ async function shadows(tabId) {
     }
   }finally{target.shadowBusy=false;}
 }
-async function rememberMode(target,mode) {
-  target.mode=mode;const {sessionModes={}}=await chrome.storage.local.get('sessionModes');
-  for(const id of target.sessions)sessionModes[id]=mode;await chrome.storage.local.set({sessionModes});
+let modeWrites=Promise.resolve();
+function writeModes(update){
+  const run=async()=>{const {sessionModes={}}=await chrome.storage.local.get('sessionModes');update(sessionModes);await chrome.storage.local.set({sessionModes});};
+  const job=modeWrites.then(run,run);modeWrites=job.catch(()=>{});return job;
+}
+async function rememberMode(target,mode){
+  target.mode=mode;
+  await writeModes(modes=>{for(const id of target.sessions)modes[id]=mode;});
   for(const id of target.sessions)publish({type:'mode',sessionId:id,mode,full:mode==='raster'?true:!!target.full});
   target.nextRaster=0;
 }
+
 async function snapshot(tabId) {
   const target = targets.get(tabId);
   if (!target || target.capturing || target.syncing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
@@ -222,7 +244,7 @@ async function snapshot(tabId) {
     target.pending = null;
     // Coalesce mutations while paying down a byte budget. Initial state is sent only once.
     const bytes = new TextEncoder().encode(JSON.stringify(delta)).byteLength;
-    target.nextSend = Date.now() + Math.max(200, delta.reset ? 200 : bytes / 131072 * 1000);
+    target.nextSend = Date.now() + Math.max(target.videoFPS===2?1000:200, delta.reset ? 200 : bytes / 131072 * 1000);
   } catch (error) {
     target.contextId = null;
     if (targets.has(tabId)) for (const id of target.sessions) status(id,'error',error.message);
@@ -234,10 +256,11 @@ async function raster(tabId) {
   target.rasterBusy=true;
   try{
     await world(tabId);
-    const info=await evaluate(tabId,'({...globalThis.__tabShareDOM.fallback(),scrollX,scrollY})');
+    let info=await evaluate(tabId,'({...globalThis.__tabShareDOM.fallback(),scrollX,scrollY})');
     info.version=target.document.version;
     if(target.full!==info.full){target.full=info.full;for(const id of target.sessions)publish({type:'mode',sessionId:id,full:info.full,mode:target.mode});}
     const direct=[...target.sessions].some(id=>roomPeers(id).some(p=>p.direct));
+    if(direct)info=await offscreen({type:'layout',tabId,info})||info;
     await videoState(tabId,direct&&(info.full||info.regions.length>0));
     const geometry=JSON.stringify(info);
     if(target.videoGeometry!==geometry){target.videoGeometry=geometry;for(const id of target.sessions)publish({type:'video',sessionId:id,info});}
@@ -324,7 +347,7 @@ async function pause(sessionId) {
   if (!target) return;
   target.sessions.delete(sessionId);
   if (target.sessions.size) return;
-  clearInterval(target.timer);
+  target.inputs?.clear();clearInterval(target.timer);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   await videoState(binding.tabId,false);nativeTabs.delete(binding.tabId);await offscreen({type:'stop-video',tabId:binding.tabId}).catch(()=>{});
   target.resources?.dispose();
@@ -363,7 +386,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if(!target)return;
   if(method==='Page.screencastFrame'){
     const ack=()=>command(source.tabId,'Page.screencastFrameAck',{sessionId:params.sessionId}).catch(()=>{});
-    if(!target.streaming||target.frameBusy||Date.now()-(target.lastFrame||0)<33){void ack();return;}
+    if(!target.streaming||target.frameBusy||Date.now()-(target.lastFrame||0)<1000/(target.videoFPS||30)){void ack();return;}
     target.frameBusy=true;target.lastFrame=Date.now();
     void offscreen({type:'frame',tabId:source.tabId,data:params.data}).catch(()=>{}).finally(()=>{target.frameBusy=false;void ack();});
   }
@@ -378,7 +401,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 function detached(tabId, reason) {
   const target = targets.get(tabId);
   if (!target) return;
-  clearInterval(target.timer);
+  target.inputs?.clear();clearInterval(target.timer);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   target.resources?.dispose();nativeTabs.delete(tabId);void offscreen({type:'stop-video',tabId}).catch(()=>{});targets.delete(tabId);
   for (const id of target.sessions) {
@@ -410,6 +433,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if(message.type==='signal'){const p=peers.get(message.sessionId+':'+message.viewerId);if(p){if(message.signal?.description?.type==='offer')p.attempt=message.signal.attempt;transmit(message);}}
     if(message.type==='peer-state')schedule(()=>peerState(message));
     if(message.type==='peer-input')peerInput(message);
+    if(message.type==='video-budget'){
+      const t=targets.get(message.tabId),fps=message.fps===2?2:30;
+      if(t&&t.videoFPS!==fps){t.videoFPS=fps;t.nextVideo=0;t.nextSend=0;
+        if(t.streaming&&!nativeTabs.has(message.tabId))void command(message.tabId,'Page.startScreencast',{format:'jpeg',quality:80,maxWidth:3840,maxHeight:2160,everyNthFrame:Math.round(30/fps)}).catch(()=>{});
+      }
+    }
     if(message.type==='native-ended'){nativeTabs.delete(message.tabId);const t=targets.get(message.tabId);if(t){t.streaming=false;t.nextRaster=0;}}
     respond(true);return false;
   }
@@ -437,7 +466,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const nativeTab=shares[message.id]?.tabId;
       delete shares[message.id]; delete sessionTabs[message.id];
       if(nativeTab&&nativeTabs.has(nativeTab)&&!targets.has(nativeTab)&&!Object.values(shares).some(s=>s.tabId===nativeTab)){nativeTabs.delete(nativeTab);await offscreen({type:'stop-video',tabId:nativeTab}).catch(()=>{});}
-      const {sessionModes={}}=await chrome.storage.local.get('sessionModes');delete sessionModes[message.id];await chrome.storage.local.set({sessionModes});
+      await writeModes(modes=>{delete modes[message.id];});
       await chrome.storage.local.set({shares, sessionTabs});
       return {ok: true};
     }

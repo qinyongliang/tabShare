@@ -64,3 +64,22 @@ func BenchmarkSmallDOMDelta(b *testing.B) {
 		}
 	}
 }
+
+func TestCSSOnlyChangesAndRemovalSurviveLateJoin(t *testing.T) {
+	state := documentState{}
+	if err := state.apply(&Document{Version: "v", Sequence: 1, Reset: true, Root: "1", Nodes: []map[string]any{{"id": "1", "tag": "body"}}, CSS: "@keyframes old{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.apply(&Document{Version: "v", Sequence: 2, Root: "1", CSS: "@keyframes new{}", CSSChanged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if state.snapshot().CSS != "@keyframes new{}" {
+		t.Fatal("CSS-only delta was lost")
+	}
+	if err := state.apply(&Document{Version: "v", Sequence: 3, Root: "1", CSSChanged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if state.snapshot().CSS != "" {
+		t.Fatal("late join restored deleted CSS")
+	}
+}

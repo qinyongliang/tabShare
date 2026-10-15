@@ -35,6 +35,7 @@ jobs:
       - name: Real browser integration
         run: |
           browser_path=$(command -v google-chrome)
+          CHROMIUM_PATH="$browser_path" npm run test:optimizations
           CHROMIUM_PATH="$browser_path" TEST_RTC=0 npm run test:e2e
           CHROMIUM_PATH="$browser_path" TEST_TURN=1 npm run test:e2e
 

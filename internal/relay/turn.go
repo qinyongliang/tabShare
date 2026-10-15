@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/turn/v4"
@@ -180,18 +181,20 @@ func turnPeerAllowed(ip net.IP, private bool) bool {
 }
 
 type builtinTURN struct {
-	mu          sync.Mutex
-	server      *turn.Server
-	owner       *Server
-	cfg         TURNConfig
-	realm       string
-	closed      bool
-	relays      map[int]*turnPacket
-	users       map[string]int
-	pending     map[string]turnPending
-	connections map[*turnConn]struct{}
-	listeners   []net.Listener
-	udp         net.PacketConn
+	mu            sync.Mutex
+	server        *turn.Server
+	owner         *Server
+	cfg           TURNConfig
+	realm         string
+	closed        bool
+	receivedBytes atomic.Uint64
+	sentBytes     atomic.Uint64
+	relays        map[int]*turnPacket
+	users         map[string]int
+	pending       map[string]turnPending
+	connections   map[*turnConn]struct{}
+	listeners     []net.Listener
+	udp           net.PacketConn
 }
 type turnPending struct {
 	user string
@@ -227,7 +230,15 @@ func (p *turnPacket) WriteTo(b []byte, a net.Addr) (int, error) {
 	if !ok || !turnPeerAllowed(u.IP, p.manager.cfg.AllowPrivatePeers) {
 		return 0, errors.New("TURN peer address denied")
 	}
-	return p.PacketConn.WriteTo(b, a)
+	n, err := p.PacketConn.WriteTo(b, a)
+	p.manager.sentBytes.Add(uint64(n))
+	return n, err
+}
+
+func (p *turnPacket) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, a, err := p.PacketConn.ReadFrom(b)
+	p.manager.receivedBytes.Add(uint64(n))
+	return n, a, err
 }
 
 type turnGenerator struct{ m *builtinTURN }
