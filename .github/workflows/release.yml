@@ -1,0 +1,92 @@
+name: Publish GitHub Release
+
+on:
+  workflow_run:
+    workflows: [Build tagged version]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to publish (empty uses extension version)'
+        required: false
+        type: string
+  # Reconcile the current version when publication support is installed or updated.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/scripts/*release.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-github-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish verified version packages
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select successful tag build
+        id: build
+        uses: actions/github-script@v7
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        with:
+          script: |
+            const {pathToFileURL}=require('node:url');
+            const {selectRelease}=await import(pathToFileURL(process.env.GITHUB_WORKSPACE+'/.github/scripts/select-release.mjs').href);
+            const {version}=require('./extension/manifest.json');
+            await selectRelease({github,context,core,requestedTag:process.env.REQUESTED_TAG,version});
+      - name: Download existing build artifacts
+        if: steps.build.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.build.outputs.run-id }}
+          pattern: tabshare-*
+          path: downloads
+      - name: Verify packages and collect checksums
+        if: steps.build.outputs.publish == 'true'
+        run: node .github/scripts/prepare-release.mjs downloads release-files
+      - name: Publish downloadable release assets
+        if: steps.build.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.build.outputs.tag }}
+          RELEASE_SHA: ${{ steps.build.outputs.commit }}
+          PRERELEASE: ${{ steps.build.outputs.prerelease }}
+          BUILD_RUN_ID: ${{ steps.build.outputs.run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/tabshare-release-notes.md"
+          cat > "$notes" <<'NOTES'
+          ## 下载
+
+          - Chrome 扩展：下载 `tabshare-extension.zip`，解压后在 Chrome 扩展管理页加载。
+          - 服务端：按系统和 CPU 架构下载 `tabshare-<系统>-<架构>.tar.gz` 或 `.zip`；macOS 对应 `darwin`，Apple Silicon 对应 `arm64`。
+          - 文件校验：将 `SHA256SUMS.txt` 与下载文件放在同一目录，使用 `sha256sum -c SHA256SUMS.txt --ignore-missing`（macOS 可使用 `shasum -a 256`）。
+
+          使用和部署步骤见仓库 README 与压缩包内的文档。
+          NOTES
+          printf '\n来源构建：https://github.com/%s/actions/runs/%s\n提交：`%s`\n' "$GH_REPO" "$BUILD_RUN_ID" "$RELEASE_SHA" >> "$notes"
+          files=(release-files/*)
+          if gh release view "$RELEASE_TAG" --json tagName >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" --verify-tag --target "$RELEASE_SHA" --title "TabShare $RELEASE_TAG" --notes-file "$notes" --draft
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$PRERELEASE"
+          gh release view "$RELEASE_TAG" --json url --jq .url

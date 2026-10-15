@@ -69,7 +69,7 @@ docs/            使用、部署与实现文档
 
 ## Tag 构建
 
-推送任意 tag 到 GitHub 时，`.github/workflows/tag-build.yml` 自动运行 Go race 测试、`go vet` 、扩展控制器测试及真实浏览器协议集成测试。通过后构建 Linux、macOS、Windows 的 amd64/arm64 服务端，以及 Chrome 插件 ZIP；产物带 SHA-256 校验文件，在对应 Actions 运行的 Artifacts 中保留 30 天。工作流也支持手动运行。
+推送任意 tag 到 GitHub 时，`.github/workflows/tag-build.yml` 自动运行 Go race 测试、`go vet` 、扩展控制器测试及真实浏览器协议集成测试。通过后构建 Linux、macOS、Windows 的 amd64/arm64 服务端，以及 Chrome 插件 ZIP。版本标签（如 `v0.5.2`、`v0.6.0-rc.1`）构建成功后，`Publish GitHub Release` 自动将七个包和合并后的 `SHA256SUMS.txt` 发布到 [Releases](https://github.com/qinyongliang/tabShare/releases)，预发布标签标记为 prerelease。Actions 的原始 Artifacts 另保留 30 天。构建工作流也支持手动运行。
 
 例如，在准备发布的主分支提交上创建并推送标签：
 
@@ -78,4 +78,6 @@ git tag v0.5.2
 git push origin v0.5.2
 ```
 
-本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。当前工作流上传构建产物，不自动创建 GitHub Release。
+本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。发布只接受对应标签提交上的成功构建，七个构建产物必须齐全且未过期，上传前逐一核对 SHA-256。发布流程通过 `GITHUB_TOKEN` 获得本仓库的 Actions 读取和 Release 写入权限，无需配置额外令牌。
+
+已有标签需要补发时，在 Actions 中手动运行 `Publish GitHub Release`，填写标签；留空则使用扩展当前版本。安装或更新发布流程时，也会自动检查并补发当前版本。补发直接使用已成功构建的文件，不移动已有标签。若 Artifacts 已过期，先在该标签上重新运行 `Build tagged version`。下载位置是 Releases，GitHub Packages 主要用于容器等包格式。

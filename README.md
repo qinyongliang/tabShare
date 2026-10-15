@@ -4,7 +4,7 @@
 
 TabShare 由 Chrome 扩展和 Go 服务组成。网页继续在你的浏览器中运行，访客打开分享链接即可操作同一页面，共用原有登录状态。适合远程协助、演示和协作操作。
 
-[快速开始](#快速开始) · [使用指南](docs/usage.md) · [部署文档](docs/deployment.md) · [开发指南](docs/development.md) · [报告问题](https://github.com/qinyongliang/tabShare/issues)
+[下载 Releases](https://github.com/qinyongliang/tabShare/releases) · [快速开始](#快速开始) · [使用指南](docs/usage.md) · [部署文档](docs/deployment.md) · [开发指南](docs/development.md) · [报告问题](https://github.com/qinyongliang/tabShare/issues)
 
 ## 功能
 
@@ -41,6 +41,8 @@ Caddy 自动配置 HTTPS，Go 从域名解析 TURN 地址，并自动保存数�
 
 ### 2. 连接扩展
 
+可从 [Releases](https://github.com/qinyongliang/tabShare/releases) 下载 `tabshare-extension.zip` 并解压，也可以使用仓库中的 `extension/` 目录。
+
 在服务器终端读取配对令牌，妥善保存：
 
 ```sh
@@ -48,7 +50,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml exec tabshare cat /
 ```
 
 1. 打开 `chrome://extensions`，开启开发者模式。
-2. 点击“加载已解压的扩展程序”，选择仓库中的 `extension/` 目录。
+2. 点击“加载已解压的扩展程序”，选择解压后的扩展目录（或仓库中的 `extension/`）。
 3. 打开 TabShare 设置，填写 `https://你的域名` 和配对令牌，勾选自动连接并保存。
 
 ### 3. 创建分享
