@@ -187,21 +187,36 @@ async function connect() {
 async function command(tabId, method, params = {}) { return chrome.debugger.sendCommand({tabId}, method, params); }
 async function world(tabId) {
   const target = targets.get(tabId);
+  if(!target)throw new Error('共享标签页已关闭');
+  if(target.worldTask)return target.worldTask;
   if (target.contextId) return target.contextId;
+  const epoch=target.contextEpoch||0;
+  const valid=()=>{if(targets.get(tabId)!==target||(target.contextEpoch||0)!==epoch)throw new Error('共享页面正在切换，请稍后重试');};
+  const task=(async()=>{
   const tree = await command(tabId, 'Page.getFrameTree');
   const result = await command(tabId, 'Page.createIsolatedWorld', {frameId: tree.frameTree.frame.id, worldName: 'TabShareDOM'});
+  valid();
   target.contextId = result.executionContextId;
-  await evaluate(tabId, installDOM);
-  await evaluate(tabId, 'globalThis.__tabShareDOM.reset()');
-  await evaluate(tabId, 'globalThis.__tabShareDOM.setMode('+JSON.stringify(target.mode||'dom')+')');
-  target.resources=new ResourceBridge((method,params)=>command(tabId,method,params),expression=>evaluate(tabId,expression));
+  const contextId=target.contextId;
+  await evaluate(tabId, installDOM,contextId);
+  await evaluate(tabId, 'globalThis.__tabShareDOM.reset()',contextId);
+  await evaluate(tabId, 'globalThis.__tabShareDOM.setMode('+JSON.stringify(target.mode||'dom')+')',contextId);
+  valid();
+  target.resources?.dispose();
+  target.resources=new ResourceBridge((method,params)=>command(tabId,method,params),expression=>evaluate(tabId,expression,contextId));
   await target.resources.scan().catch(()=>{});
   await shadows(tabId).catch(()=>{});
-  return target.contextId;
+  valid();return contextId;
+  })().catch(error=>{if((target.contextEpoch||0)===epoch){target.contextId=null;target.resources?.dispose();target.resources=null;}throw error;}).finally(()=>{if(target.worldTask===task)target.worldTask=null;});
+  target.worldTask=task;return task;
 }
-async function evaluate(tabId, expression) {
+function invalidateWorld(target){target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;}
+async function evaluate(tabId, expression,expectedContext) {
   const target = targets.get(tabId);
-  const result = await command(tabId, 'Runtime.evaluate', {expression, contextId: target.contextId, returnByValue: true, userGesture: true, timeout:2000});
+  const contextId=expectedContext??target?.contextId;
+  if(!Number.isInteger(contextId)||contextId<=0||target?.contextId!==contextId)throw new Error('共享页面正在切换，请稍后重试');
+  const result = await command(tabId, 'Runtime.evaluate', {expression, contextId, returnByValue: true, userGesture: true, timeout:2000});
+  if(targets.get(tabId)!==target||target.contextId!==contextId)throw new Error('共享页面正在切换，请稍后重试');
   if (result.exceptionDetails) throw new Error(result.result?.description || result.exceptionDetails.text);
   return result.result.value;
 }
@@ -234,10 +249,13 @@ async function snapshot(tabId) {
   const target = targets.get(tabId);
   if (!target || target.capturing || target.syncing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
   target.capturing = true;
+  let contextId,capturingDOM=false;
   try {
-    await world(tabId);
-    const delta = target.pending || await evaluate(tabId, target.mode==='raster'? 'globalThis.__tabShareDOM.capture(true)':captureDOM);
+    contextId=await world(tabId);capturingDOM=true;
+    const delta = target.pending || await evaluate(tabId, target.mode==='raster'||target.captureLimited? 'globalThis.__tabShareDOM.capture(true)':captureDOM,contextId);
+    capturingDOM=false;
     if (!delta) return;
+    target.captureLimited=!!delta.meta?.truncated;
     if(delta.meta?.mode!==target.mode)await rememberMode(target,delta.meta.mode);
     const requests=delta.resources;delete delta.resources;
     if(!target.pending)target.document.apply(delta);
@@ -250,7 +268,10 @@ async function snapshot(tabId) {
     const bytes = new TextEncoder().encode(JSON.stringify(delta)).byteLength;
     target.nextSend = Date.now() + Math.max(target.videoFPS===2?1000:200, delta.reset ? 200 : bytes / 131072 * 1000);
   } catch (error) {
-    target.contextId = null;
+    if(capturingDOM&&contextId===target.contextId&&/Execution was terminated|timed out/i.test(error.message)){
+      try{await evaluate(tabId,'globalThis.__tabShareDOM.limit()',contextId);target.captureLimited=true;target.pending=null;target.nextSend=0;return;}catch{}
+    }
+    if(contextId===target.contextId)invalidateWorld(target);
     if (targets.has(tabId)) for (const id of target.sessions) status(id,'error',error.message);
   } finally { target.capturing = false; }
 }
@@ -399,7 +420,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if(method==='Page.javascriptDialogOpening'){target.dialog={id:crypto.randomUUID(),kind:params.type,message:params.message.slice(0,8192),default:(params.defaultPrompt||'').slice(0,8192)};for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:target.dialog});}
   if(method==='Page.javascriptDialogClosed'){target.dialog=null;for(const id of target.sessions)publish({type:'dialog',sessionId:id,dialog:null});}
   if (target && method === 'Page.frameNavigated' && !params.frame.parentId) {
-    target.resources?.dispose();target.contextId = null; target.pending = null; target.nextSend = 0;
+    invalidateWorld(target);target.pending = null; target.nextSend = 0;
   }
 });
 function detached(tabId, reason) {

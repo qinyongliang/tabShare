@@ -41,6 +41,20 @@ CHROMIUM_PATH=/usr/bin/chromium npm run test:transport
 
 `test:optimizations` 还用真实 Canvas MediaStreamTrack 检查原生来源的裁剪像素、整页轨道切换、后台限帧和资源释放；它不验证 tabCapture 授权。`test:transport` 分别建立 1、5、10 名访客的实际 TURN/TCP 连接，共享区域视频，持续发送 DOM 差异和输入，并检查受限 TCP 通道中的资源传输、其他访客响应、重连和队列释放。默认持续 30 秒，可用 `TEST_SOAK_SECONDS=120` 或更长时间运行（最多 86400 秒）；这是受控传输回归，不代表公网容量承诺。
 
+### 真实网站检查
+
+```sh
+CHROMIUM_PATH=/usr/bin/chromium npm run test:sites
+# 也可以只检查一个站点
+CHROMIUM_PATH=/usr/bin/chromium TEST_SITES=github npm run test:sites
+```
+
+该命令访问实时 GitHub Issues、Go 文档、YouTube 和 Wikipedia，用两名真实访客检查 WebRTC、页面显示、搜索输入/提交、滚动和地址导航。YouTube 还检查公开视频播放进度；不会录音或共享音频。测试使用与受控集成相同的原始 worker、CDP 和内置 TURN/TCP，仍不覆盖实际扩展安装和授权。渲染报告明确记录 `dom` 或 `whole-page-video`，视频降级通过不能作为复杂网站的原生 DOM 兼容性结论。
+
+结果写入 `test-results/real-sites/results.json`，源页、访客完整界面与共享区域截图保存在同目录。报告含失败资源的主机名、检查结果、DOM 原始消息字节和五秒 WebRTC 接收统计；DOM 字节不包含视频或协议流量，ICE 统计也不等于运营商计费流量。使用全新浏览器配置，只访问公开页面；报告不包含分享密钥或 Cookie。
+
+需要源浏览器能够访问网站、脚本、图片和字体域名。受限云网络需先在环境设置保存并发布允许域名；HTTPS 代理环境使用现有 `HTTPS_PROXY`，保留证书校验。Chromium 的现有 NSS 证书数据库也需要可写，否则会在初始化时拒绝证书库；不要关闭 TLS 校验处理此问题。网站同意页、反爬验证和网络失败都可能阻止检查。网络阻断标为 `blocked` 或 `partial-network-blocked`，交互或内容断言失败标为 `failed`；任何一项未通过均返回非零。网站结构会变化，因此该检查按需运行，不作为 tag 构建的固定门槛。当前实测范围及网络缺口见 [验证记录](validation.md#052-真实网站检查)。
+
 ## 目录结构
 
 ```text
@@ -60,8 +74,8 @@ docs/            使用、部署与实现文档
 例如，在准备发布的主分支提交上创建并推送标签：
 
 ```sh
-git tag v0.5.1
-git push origin v0.5.1
+git tag v0.5.2
+git push origin v0.5.2
 ```
 
 本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。当前工作流上传构建产物，不自动创建 GitHub Release。

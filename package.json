@@ -8,7 +8,9 @@
     "test:e2e": "node tests/e2e.mjs",
     "test:optimizations": "node tests/optimizations.mjs",
     "pretest:transport": "go build -o bin/tabshare ./cmd/tabshare",
-    "test:transport": "node tests/transport.mjs"
+    "test:transport": "node tests/transport.mjs",
+    "pretest:sites": "go build -o bin/tabshare ./cmd/tabshare",
+    "test:sites": "node tests/e2e.mjs --real-sites"
   },
   "engines": {
     "node": ">=22"

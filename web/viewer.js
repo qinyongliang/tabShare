@@ -41,6 +41,8 @@ function resync(){if(peerReady)void peer.send({type:'resync'},'input');else send
 function updateVideo(){
   const live=peerReady&&video.readyState>=2&&!video.paused;
   video.hidden=!full||!live;$('fallback').style.opacity=full&&live?'0':'1';
+  const note=full?(live?'WebRTC 画面 · 点击、输入和滚动作用于源标签页':'应急画面 · 点击、输入和滚动作用于源标签页'):'DOM 差异同步 · 可选择文字、复制和操作表单';
+  if($('render-note').textContent!==note)$('render-note').textContent=note;
 }
 function drawRegions(){
   updateVideo();if(!peerReady||!videoInfo||video.readyState<2)return;
@@ -91,7 +93,7 @@ function receive(m,direct=false){
   if(m.type==='dom')render(m.document);
   if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;full=!!m.full;frame.hidden=full;$('fallback').hidden=!full;updateVideo();notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);}
   if(m.type==='raster'){
-    if(m.full&&(!modeKnown||full)){full=true;frame.hidden=true;$('fallback').hidden=false;$('fallback').src='data:image/jpeg;base64,'+m.data;notify('已连接 · 应急截图 · '+route,true);}
+    if(m.full&&(!modeKnown||full)){full=true;frame.hidden=true;$('fallback').hidden=false;$('fallback').src='data:image/jpeg;base64,'+m.data;updateVideo();notify('已连接 · 应急截图 · '+route,true);}
     else{const node=mirror?.nodes.get(m.nodeId);if(node){let image=node.querySelector('img[data-raster]');if(!image){node.replaceChildren();image=mirror.doc.createElement('img');image.dataset.raster='true';image.style.cssText='display:block;width:100%;height:100%;object-fit:fill';node.append(image);}image.src='data:image/jpeg;base64,'+m.data;}}
   }
   if(m.type==='status'&&m.status!=='connected'){connected=false;notify(m.detail||'等待共享页面');$('detail').textContent=m.detail||'等待共享浏览器连接。';$('empty').hidden=false;$('surface').hidden=true;$('display-area').hidden=true;}

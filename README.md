@@ -85,6 +85,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml exec tabshare cat /
 欢迎通过 [Issues](https://github.com/qinyongliang/tabShare/issues) 提交问题或建议，通过 Pull Request 改进项目。
 
 - [开发与构建](docs/development.md)：源码启动、测试、目录结构和 tag 自动构建。
+- [真实网站检查](docs/development.md#真实网站检查)：GitHub、YouTube、Wikipedia 的实测入口、截图与网络要求。
 - [贡献指南](CONTRIBUTING.md)：问题反馈、提交要求和验证方式。
 - [设计参考](docs/reference.md)：参考工具与技术选择。
 

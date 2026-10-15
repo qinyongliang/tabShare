@@ -14,11 +14,12 @@ import {ResourceBridge} from '../extension/resources.js';
 import {chromium} from 'playwright-core';
 
 const rtcEnabled=process.env.TEST_RTC!=='0';
+const realSites=process.argv.includes('--real-sites');
 const root = path.resolve(import.meta.dirname, '..');
 const temporary = await mkdtemp(path.join(tmpdir(), 'tabshare-e2e-'));
 const browserPath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
 let source, server, visitors, cdp, fixture, assets, shutdownAgent,videoAnimation;
-let turnPort;const useTURN=rtcEnabled&&process.env.TEST_TURN==='1';
+let turnPort;const useTURN=rtcEnabled&&(process.env.TEST_TURN==='1'||realSites);
 let assetOrigin;const assetHits=[];
 const timers=new Set();
 let serverLog = '', sourceLog = '';
@@ -38,13 +39,13 @@ class CDP {
   constructor(url) {
     this.ws = new WebSocket(url); this.pending = new Map(); this.id = 0; this.listeners=[];
     this.ready = new Promise((resolve, reject) => { this.ws.onopen = resolve; this.ws.onerror = reject; });
-    this.ws.onmessage = event => { const m = JSON.parse(event.data); if (!m.id) {for(const listener of this.listeners)listener(m);return;} const call = this.pending.get(m.id); if (!call) return; this.pending.delete(m.id); clearTimeout(call.timer); if (m.error) call.reject(new Error(m.error.message)); else call.resolve(m.result); };
+    this.ws.onmessage = event => { const m = JSON.parse(event.data); if (!m.id) {for(const listener of this.listeners)listener(m);return;} const call = this.pending.get(m.id); if (!call) return; this.pending.delete(m.id); clearTimeout(call.timer); if (m.error) call.reject(new Error(call.method+': '+m.error.message+(m.error.data?' ('+m.error.data+')':''))); else call.resolve(m.result); };
   }
   async call(method, params = {}, sessionId) {
     await this.ready; const id = ++this.id;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('CDP timeout: ' + method)); }, 10000);
-      this.pending.set(id, {resolve, reject, timer}); this.ws.send(JSON.stringify({id, method, params, ...(sessionId ? {sessionId} : {})}));
+      this.pending.set(id, {resolve, reject, timer,method}); this.ws.send(JSON.stringify({id, method, params, ...(sessionId ? {sessionId} : {})}));
     });
   }
   async evaluate(session, expression) {
@@ -102,7 +103,8 @@ try {
   const profile = path.join(temporary, 'chrome'); await mkdir(profile);
   // Enterprise policy blocks unpacked extensions here. Exercise the actual worker through a
   // Chrome-API test adapter connected to a real, isolated browser; never change that policy.
-  source = spawn(browserPath,['--headless=new','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--window-size=1280,800','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:['ignore','ignore','pipe']});
+  const proxyArgs=realSites&&process.env.HTTPS_PROXY?['--proxy-server='+process.env.HTTPS_PROXY,'--proxy-bypass-list=localhost;127.0.0.1']:[];
+  source = spawn(browserPath,['--headless=new','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--window-size=1280,800','--remote-debugging-port=0',`--user-data-dir=${profile}`,...proxyArgs,'about:blank'],{stdio:['ignore','ignore','pipe']});
   source.stderr.on('data',data=>{sourceLog=(sourceLog+data.toString()).slice(-5000);});
   const info=await until(async()=>(await readFile(path.join(profile,'DevToolsActivePort'),'utf8')).trim().split('\n'),'Chrome debugger');
   cdp=new CDP(`ws://127.0.0.1:${info[0]}${info[1]}`);
@@ -112,10 +114,10 @@ try {
   const tabEvents={onCreated:listeners(),onRemoved:listeners(),onUpdated:listeners()},debugEvents={onEvent:listeners(),onDetach:listeners()};
   async function getTabs(){const targets=(await cdp.call('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.targetId!==offscreenTarget);return targets.map(t=>{if(!ids.has(t.targetId))ids.set(t.targetId,++nextId);return{id:ids.get(t.targetId),url:t.url,title:t.title,targetId:t.targetId};});}
   async function getTab(id){const tab=(await getTabs()).find(t=>t.id===id);if(!tab)throw new Error('tab closed');return tab;}
-  const messages=listeners(),local={},sessionStorage={},packets=[],receivedInputs=[];
+  const messages=listeners(),local={},sessionStorage={},packets=[],receivedInputs=[],commandFailures=[];
   const chrome={
     tabs:{...tabEvents,query:getTabs,get:getTab,remove:async id=>{const tab=await getTab(id);await cdp.call('Target.closeTarget',{targetId:tab.targetId});},create:async({url,active})=>{const created=await cdp.call('Target.createTarget',{url,background:!active});return until(async()=>(await getTabs()).find(t=>t.targetId===created.targetId),'new tab');},reload:async id=>{await cdp.call('Page.reload',{},sessions.get(id));}},
-    debugger:{...debugEvents,attach:async({tabId})=>{const tab=await getTab(tabId);const r=await cdp.call('Target.attachToTarget',{targetId:tab.targetId,flatten:true});sessions.set(tabId,r.sessionId);},detach:async({tabId})=>{const sessionId=sessions.get(tabId);sessions.delete(tabId);if(sessionId)await cdp.call('Target.detachFromTarget',{sessionId});},sendCommand:async({tabId},method,params)=>{if(method.includes('Screencast'))videoCommands.push(method);if(method==='Runtime.evaluate'&&params.expression.includes('__tabShareDOM.act(')){actions.push(JSON.parse(params.expression.slice(params.expression.indexOf('.act(')+5,-1)).action);}return cdp.call(method,params,sessions.get(tabId));}},
+    debugger:{...debugEvents,attach:async({tabId})=>{const tab=await getTab(tabId);const r=await cdp.call('Target.attachToTarget',{targetId:tab.targetId,flatten:true});sessions.set(tabId,r.sessionId);},detach:async({tabId})=>{const sessionId=sessions.get(tabId);sessions.delete(tabId);if(sessionId)await cdp.call('Target.detachFromTarget',{sessionId});},sendCommand:async({tabId},method,params)=>{if(method.includes('Screencast'))videoCommands.push(method);if(method==='Runtime.evaluate'&&params.expression.includes('__tabShareDOM.act(')){actions.push(JSON.parse(params.expression.slice(params.expression.indexOf('.act(')+5,-1)).action);}try{const r=await cdp.call(method,params,sessions.get(tabId));if(realSites&&r.exceptionDetails&&commandFailures.length<100)commandFailures.push({tabId,method,error:String(r.result?.description||r.exceptionDetails.text).slice(0,500)});return r;}catch(error){if(realSites&&commandFailures.length<100)commandFailures.push({tabId,method,error:error.message.slice(0,500)});throw error;}}},
     storage:{local:{get:async keys=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,structuredClone(local[k])])),set:async values=>Object.assign(local,structuredClone(values))},session:{get:async key=>({[key]:sessionStorage[key]}),set:async values=>Object.assign(sessionStorage,values)}},
     runtime:{id:'test-profile',onMessage:messages,onStartup:listeners()},alarms:{create(){},onAlarm:listeners()}
   };
@@ -184,6 +186,10 @@ try {
   const context = await visitors.newContext({viewport: {width: 1440, height: 1000}});
   const errors = [],viewerInputs=[];
   async function view(url,viewerContext=context) { const page = await viewerContext.newPage();if(rtcEnabled)await page.addInitScript(forceRelay=>{const RealRTC=RTCPeerConnection;globalThis.__rtc=[];globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(forceRelay?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};},useTURN); page.on('pageerror',e=>errors.push(e.message));if(rtcEnabled)page.on('console',m=>{if(m.text().includes('TabShare RTC'))console.log(m.text());});page.on('websocket',socket=>{socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}});}); await page.goto(url); await page.locator('#surface').waitFor({state: 'visible', timeout: 20000}); await page.locator('#dot.live').waitFor(); return page; }
+  if(realSites){
+    const {runRealSites}=await import('./real-sites.mjs');
+    await runRealSites({root,request,view,cdp,chrome,getTabs,sessions,packets,videoGeometries,errors,commandFailures,resourceReads});
+  }else{
   const one = await view(share.value.shareUrl);
   const two = await view(share.value.shareUrl);
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
@@ -369,6 +375,7 @@ try {
   for(const timer of timers)clearInterval(timer);
   await revoked.screenshot({path: path.join(root, 'test-results/revoked.png')});
   console.log('PASS: persistent links, unattended restart/reconnect, capability revocation, no browser JS errors');
+  }
 } catch (error) {
   console.error(error.message);
   // Logs do not include pairing credentials or share capability URLs.
