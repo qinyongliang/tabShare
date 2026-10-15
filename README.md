@@ -48,16 +48,35 @@ go build -o bin/tabshare ./cmd/tabshare
 
 ## 公网部署
 
-Go 服务只需要接收来自扩展和访客的 HTTPS/WebSocket 连接，不需要连接到共享电脑的入站端口。
+Go 同一进程提供 HTTP/WebSocket、STUN 和 TURN，无需单独部署 coturn。扩展和访客都主动连接服务器，共享电脑不需要开放入站端口。
 
-提供 Docker Compose + Caddy 配置，自动重启并保留数据。准备域名，解析到你的服务器，开放 80/443，在仓库根目录运行：
+提供 Docker Compose + Caddy 配置，自动重启并保留数据。在仓库根目录运行：
 
 ```sh
 export TABSHARE_DOMAIN=tabs.example.com
+export TABSHARE_TURN_PUBLIC_IP=你的服务器公网IPv4
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
-通过服务器上的 Docker 卷安全读取 `/data/admin-token` 并配置扩展。公网扩展地址必须使用 HTTPS。部署文件已提供，云任务没有替你部署公网服务或申请证书。
+域名需解析到服务器。防火墙、安全组和 NAT 需放通并保持端口一一映射：
+
+| 用途 | 端口 |
+| --- | --- |
+| Caddy HTTP/HTTPS | 80/TCP、443/TCP |
+| 内置 STUN/TURN | 3478/UDP、3478/TCP |
+| TURN 中继分配 | 49160–49359/UDP |
+
+通过服务器上的 Docker 卷安全读取 `/data/admin-token` 并配置扩展。内置 TURN 自动生成并持久保存 `/data/turn-secret`（0600），自动向已加入会话的两端下发临时凭据；无需在插件或访客端手填 TURN。公网扩展地址必须使用 HTTPS。部署文件已提供，云任务没有替你配置公网域名、防火墙或申请证书。
+
+直接运行二进制时，TURN 默认关闭；在 HTTPS 反向代理后使用以下参数启用：
+
+```sh
+./bin/tabshare -listen 0.0.0.0:8080 -data .data \
+  -public-url https://tabs.example.com \
+  -turn-listen 0.0.0.0:3478 -turn-public-ip 你的服务器公网IPv4
+```
+
+`-turn-public-ip` 是对外公布的 IPv4；`-turn-relay-ip` 可指定本机绑定地址，默认跟随监听地址。`-turn-host` 可改为解析到该 IP 的域名，`-turn-relay-ports` 可改分配范围（同时修改端口映射）。Docker 默认使用上表的固定范围。
 
 ## WebRTC 和 P2P
 
@@ -65,27 +84,20 @@ DOM、本地表单输入与图片/字体优先走 WebRTC DataChannel；状态、
 
 Chrome MV3 service worker 不提供 RTCPeerConnection，扩展在 offscreen document 中维护连接。手动共享当前标签页时尝试原生 `tabCapture`；Chrome 需要所有者先点击扩展，流 ID 也只能短时间内使用。自动重开的网址标签页及原生捕获不可用时，使用 CDP `Page.startScreencast` 连续获取共享标签页画面，送到 canvas 视频轨道再由 WebRTC 编码。没有合成帧的后台标签页使用自适应截图补充视频源：变化时目标 30 fps，不变时降低采样并跳过重复画面；浏览器自身限制后台页面脚本/动画时，无法强迫原网站按 30 fps 绘制。此路径在本机有 JPEG 解码及再次编码开销；JPEG 帧不经 Go 服务转发。它无法绕过 Chrome 捕获授权，扩展调试标识保持可见。关闭/暂停会话时释放视频；没有复杂区域的 DOM 模式停止视频采集。
 
-优先直连，两端用 ICE/STUN 协商；默认 STUN 为 `stun:stun.l.google.com:19302`，可通过 `-stun` 改成自有服务或设为空。直连失败时优先用配置的 TURN，仍为加密的 WebRTC 传输。TURN 是中继，不能称为直接 P2P。Go 负责鉴权、会话成员和 SDP/ICE 协商；初始化协商阶段或 WebRTC 不可用时，WebSocket/HTTP 应急传输也会经过 Go。页面显示当前 `P2P 直连`、`TURN 中继` 或 `WebSocket 兜底`。连接失败后每 5 秒重试协商，不依赖所有者逐次操作。
+优先直连，两端用 ICE/STUN 协商；内置 TURN 启用时也提供 STUN。默认额外 STUN 为 `stun:stun.l.google.com:19302`，可通过 `-stun` 改成自有服务或设为空（仅用内置 STUN）。直连失败时使用 TURN 中继，DOM DataChannel 和视频都适用，WebRTC 保持端到端加密；Go 的 TURN 不解密数据。初始化协商阶段或 WebRTC 不可用时，WebSocket/HTTP 应急传输也会经过 Go。页面显示当前 `P2P 直连`、`TURN 中继` 或 `WebSocket 兜底`。连接失败后每 5 秒重试，服务重新签发凭据给两端，避免无人值守运行超过 24 小时后使用过期凭据。
 
-公网跨 NAT 建议部署 TURN。可使用已有 TURN REST 服务，在 Go 的环境配置中设置 `TABSHARE_TURN_URLS`（逗号分隔）与 `TABSHARE_TURN_SECRET`（至少 32 字符，须与 TURN 一致）。服务签发 24 小时的临时用户名/密码，共享密钥与管理员令牌不会发给 TURN。不要把真实密钥提交到 Git 或填到访客页面。
+内置 TURN 只接受仍在分享会话中的临时账户，凭据有效期为 24 小时。访客退出或撤销分享时清理其分配；每个临时账户最多 8 个分配/待分配，全局最多 256 个分配，并受实际端口池容量限制。默认拒绝访问服务器内网、回环和云元数据等保留地址；可信局域网部署可显式加 `-turn-allow-private-peers`。当前 TURN 中继分配支持 IPv4 UDP，通过 TURN/UDP、TURN/TCP 或可选 TURN/TLS 承载。每位访客独立建立连接，源端上传/编码负载随访客数量增长，中继时服务器也承担相应带宽。
 
-提供 Linux host-network 的可选 coturn profile。在 `deploy/.env` 安全设置：
-
-```dotenv
-TABSHARE_DOMAIN=tabs.example.com
-TABSHARE_TURN_PUBLIC_IP=你的服务器公网IPv4
-TABSHARE_TURN_URLS=turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp
-# 在本机生成至少32字符的随机值，写入下面变量；这里不提供默认密钥
-TABSHARE_TURN_SECRET=
-```
-
-把 TURN 域名解析到公网 IP，开放 3478 TCP/UDP、49160–49359 UDP 后运行：
+需要 TURN/TLS 时，给同一个 Go 服务追加：
 
 ```sh
-docker compose --env-file deploy/.env -f deploy/compose.yaml --profile turn up -d --build
+-turn-host turn.example.com -turn-tls-listen 0.0.0.0:5349 \
+-turn-cert /path/to/fullchain.pem -turn-key /path/to/privkey.pem
 ```
 
-未配置密钥或公网 IP 时，TURN 容器拒绝启动。此 profile 提供 TURN UDP/TCP；完全禁用 UDP且只允许 HTTPS 出站的网络还需要自有 `turns:` TLS 服务及相应证书，默认 Caddy 的 443 不直接承载 TURN。云任务没有配置你的公网 TURN、域名或防火墙，因此不能保证所有网络的穿透已完成。每位访客独立建立连接，源端上传/编码负载随访客数量增长。
+证书需被客户端信任且匹配 TURN 域名；证书/私钥在每次 TLS 握手时重新读取，支持外部续期。需额外开放 5349/TCP，Docker 还需挂载证书并映射端口。默认 Caddy 的 HTTPS 443 不直接承载 TURN；只允许 443 出站的网络需要独立 IP/端口规划。私钥、TURN 密钥和管理员令牌不能提交到 Git 或发给访客。
+
+仍支持外部 TURN REST 服务：保持内置 TURN 关闭，在 Go 的环境配置中设置 `TABSHARE_TURN_URLS`（逗号分隔）与 `TABSHARE_TURN_SECRET`（至少 32 字符，须与外部 TURN 一致）。临时密码下发到两端，共享密钥不下发。
 
 ## Tag 自动构建
 
@@ -94,8 +106,8 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml --profile turn up -
 例如，在准备发布的主分支提交上创建并推送标签：
 
 ```sh
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.4.1
+git push origin v0.4.1
 ```
 
 本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。当前工作流上传构建产物，不自动创建 GitHub Release。
@@ -132,6 +144,6 @@ CHROMIUM_PATH=/usr/bin/chromium TEST_RTC=0 npm run test:e2e
 CHROMIUM_PATH=/usr/bin/chromium TEST_TURN=1 npm run test:e2e
 ```
 
-浏览器集成测试使用真实 Chromium、真实 Chrome DevTools Protocol 和真实访客页面。由于云环境管理员策略禁止加载自定义扩展，测试用 Chrome API 适配器运行原始 `worker.js`，没有修改管理员策略。WebRTC 测试运行原始 offscreen 模块，使用真实 RTCPeerConnection、TURN/TCP、视频编码器和访客解码器；云端策略禁用非代理 UDP，不能验证直接 UDP 穿透。独立 TURN fixture 仅监听回环地址，不是部署用服务。这验证浏览器控制、页面同步、会话和 WebRTC / 中继链路，但不代表已验证 Chrome 扩展安装、权限提示或 MV3 生命周期；这些仍需在允许加载扩展的本机 Chrome 中检查。
+浏览器集成测试使用真实 Chromium、真实 Chrome DevTools Protocol 和真实访客页面。由于云环境管理员策略禁止加载自定义扩展，测试用 Chrome API 适配器运行原始 `worker.js`，没有修改管理员策略。WebRTC 测试运行原始 offscreen 模块，使用真实 RTCPeerConnection、TURN/TCP、视频编码器和访客解码器；云端策略禁用非代理 UDP，不能验证直接 UDP 穿透。测试直接启动同一个 Go 服务的内置 TURN，仅监听回环地址，并强制 relay 候选验证中继。这验证浏览器控制、页面同步、会话和 WebRTC / 中继链路，但不代表已验证 Chrome 扩展安装、权限提示或 MV3 生命周期；这些仍需在允许加载扩展的本机 Chrome 中检查。
 
 参考工具的核对记录见 [docs/reference.md](docs/reference.md)。

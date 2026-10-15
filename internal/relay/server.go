@@ -27,6 +27,7 @@ type Config struct {
 	DataDir, PublicURL string
 	STUNURLs, TURNURLs []string
 	TURNSecret         string
+	BuiltinTURN        TURNConfig
 }
 type Session struct {
 	ID       string `json:"id"`
@@ -115,11 +116,12 @@ type Dialog struct {
 	Default string `json:"default,omitempty"`
 }
 type peer struct {
-	id     string
-	direct bool
-	conn   *websocket.Conn
-	queue  chan Message
-	cancel context.CancelFunc
+	id           string
+	direct       bool
+	lastRTCRetry time.Time
+	conn         *websocket.Conn
+	queue        chan Message
+	cancel       context.CancelFunc
 }
 type live struct {
 	viewers       map[*peer]bool
@@ -133,14 +135,16 @@ type live struct {
 	viewport      *Viewport
 }
 type Server struct {
-	mu         sync.Mutex
-	cfg        Config
-	token      string
-	sessions   map[string]*Session
-	agents     map[string]*peer
-	live       map[string]*live
-	assets     map[string]*assetBlob
-	assetBytes int
+	mu          sync.Mutex
+	cfg         Config
+	token       string
+	sessions    map[string]*Session
+	agents      map[string]*peer
+	live        map[string]*live
+	assets      map[string]*assetBlob
+	assetBytes  int
+	turn        *builtinTURN
+	turnViewers map[string]bool
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_-]{8,80}$`)
@@ -158,10 +162,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("public-url must be an HTTP(S) origin")
 	}
 	cfg.PublicURL = strings.TrimRight(cfg.PublicURL, "/")
-	if err = validateICE(cfg); err != nil {
+	if err = os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, err
 	}
-	if err = os.MkdirAll(cfg.DataDir, 0700); err != nil {
+	if err = prepareTURN(&cfg); err != nil {
+		return nil, err
+	}
+	if err = validateICE(cfg); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(cfg.DataDir, "admin-token")
@@ -183,7 +190,7 @@ func New(cfg Config) (*Server, error) {
 	} else if err != nil {
 		return nil, err
 	}
-	s := &Server{assets: map[string]*assetBlob{}, cfg: cfg, token: strings.TrimSpace(string(b)), sessions: map[string]*Session{}, agents: map[string]*peer{}, live: map[string]*live{}}
+	s := &Server{turnViewers: map[string]bool{}, assets: map[string]*assetBlob{}, cfg: cfg, token: strings.TrimSpace(string(b)), sessions: map[string]*Session{}, agents: map[string]*peer{}, live: map[string]*live{}}
 	if len(s.token) < 32 {
 		return nil, errors.New("pairing token is too short")
 	}
@@ -200,6 +207,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	for id := range s.sessions {
 		s.live[id] = &live{viewers: map[*peer]bool{}, status: "offline"}
+	}
+	if err = s.startTURN(); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -391,7 +401,7 @@ func first(c *websocket.Conn, r *http.Request) (Message, error) {
 }
 func newPeer(c *websocket.Conn, r *http.Request) *peer {
 	ctx, cancel := context.WithCancel(r.Context())
-	p := &peer{id: randomID(), conn: c, queue: make(chan Message, 32), cancel: cancel}
+	p := &peer{id: randomID(), conn: c, queue: make(chan Message, 128), cancel: cancel}
 	go func() {
 		defer cancel()
 		defer c.CloseNow()
@@ -512,6 +522,16 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		case "peer-retry":
+			for viewer := range s.live[se.ID].viewers {
+				if viewer.id == m.ViewerID && time.Since(viewer.lastRTCRetry) >= 4*time.Second {
+					viewer.lastRTCRetry = time.Now()
+					ice := s.iceServers(viewer.id)
+					send(viewer, Message{Type: "ice", ICEServers: ice})
+					send(p, Message{Type: "peer", SessionID: se.ID, ViewerID: viewer.id, ICEServers: ice})
+					break
+				}
+			}
 		case "transport":
 			for viewer := range s.live[se.ID].viewers {
 				if viewer.id == m.ViewerID {
@@ -589,6 +609,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 	p := newPeer(c, r)
 	defer p.cancel()
 	l.viewers[p] = true
+	s.turnViewers[p.id] = true
 	send(p, Message{Type: "joined", ViewerID: p.id, ICEServers: s.iceServers(p.id)})
 	send(p, Message{Type: "viewport", Viewport: l.viewport})
 	s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
@@ -616,6 +637,10 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(l.viewers, p)
+		delete(s.turnViewers, p.id)
+		if s.turn != nil {
+			s.turn.revoke(p.id)
+		}
 		if a := s.agents[se.AgentID]; a != nil {
 			send(a, Message{Type: "peer-left", SessionID: id, ViewerID: p.id})
 		}
@@ -745,6 +770,9 @@ func validViewport(width, height int, dpr float64) bool {
 	return width >= 320 && width <= 3840 && height >= 240 && height <= 2160 && !math.IsNaN(dpr) && !math.IsInf(dpr, 0) && dpr >= 1 && dpr <= 2 && float64(width)*dpr <= 4096 && float64(height)*dpr <= 4096 && float64(width)*float64(height)*dpr*dpr <= 8294400
 }
 func (s *Server) Close() {
+	if s.turn != nil {
+		s.turn.close()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, p := range s.agents {

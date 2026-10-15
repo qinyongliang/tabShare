@@ -15,6 +15,3 @@ cd /workspace/tabShare
 go mod download
 npm ci --ignore-scripts --cache "$tools_dir/npm-cache"
 go build -o bin/tabshare ./cmd/tabshare
-
-go -C tests/turn mod download
-go -C tests/turn build -o ../../bin/test-turn .

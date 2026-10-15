@@ -16,8 +16,8 @@ const rtcEnabled=process.env.TEST_RTC!=='0';
 const root = path.resolve(import.meta.dirname, '..');
 const temporary = await mkdtemp(path.join(tmpdir(), 'tabshare-e2e-'));
 const browserPath = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
-let source, server, visitors, cdp, fixture, assets, shutdownAgent,turnFixture,videoAnimation;
-let turnPort;const turnSecret=crypto.randomUUID(),useTURN=rtcEnabled&&process.env.TEST_TURN==='1';
+let source, server, visitors, cdp, fixture, assets, shutdownAgent,videoAnimation;
+let turnPort;const useTURN=rtcEnabled&&process.env.TEST_TURN==='1';
 let assetOrigin;const assetHits=[];
 const timers=new Set();
 let serverLog = '', sourceLog = '';
@@ -60,7 +60,7 @@ async function stop(process) {
 const listen = await freePort();
 const origin = `http://localhost:${listen}`;
 function startServer() {
-  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin,'-stun',''], {cwd: root,env:{...process.env,TABSHARE_TURN_URLS:useTURN?'turn:127.0.0.1:'+turnPort+'?transport=tcp':'',TABSHARE_TURN_SECRET:useTURN?turnSecret:''}, stdio: ['ignore', 'ignore', 'pipe']});
+  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin,'-stun','',...(useTURN?['-turn-listen','127.0.0.1:'+turnPort,'-turn-public-ip','127.0.0.1','-turn-relay-ip','127.0.0.1','-turn-allow-private-peers']:[])], {cwd: root,env:{...process.env,TABSHARE_TURN_URLS:'',TABSHARE_TURN_SECRET:'',TABSHARE_TURN_LISTEN:'',TABSHARE_TURN_PUBLIC_IP:''}, stdio: ['ignore', 'ignore', 'pipe']});
   server.stderr.on('data', data => { serverLog += data.toString(); });
 }
 try {
@@ -95,7 +95,7 @@ try {
   });
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
   const sourceURL = `http://127.0.0.1:${fixture.address().port}/fixture`;
-  if(useTURN){turnPort=await freePort();let ready=false;turnFixture=spawn(path.join(root,'bin/test-turn'),['-listen','127.0.0.1:'+turnPort],{env:{...process.env,TABSHARE_TEST_TURN_SECRET:turnSecret},stdio:['ignore','ignore','pipe']});turnFixture.stderr.on('data',data=>{if(data.toString().includes('ready'))ready=true;});await until(()=>ready,'loopback TURN/TCP fixture');}
+  if(useTURN)turnPort=await freePort();
   startServer(); await until(async () => (await fetch(origin + '/healthz')).ok, 'Go service');
   const token = (await readFile(path.join(temporary, 'data/admin-token'), 'utf8')).trim();
   const profile = path.join(temporary, 'chrome'); await mkdir(profile);
@@ -187,7 +187,7 @@ try {
   const two = await view(share.value.shareUrl);
   await until(() => two.locator('#viewers').textContent().then(text => text === '2 人'), 'two simultaneous viewers');
   const remoteOne=one.frameLocator('#mirror'),remoteTwo=two.frameLocator('#mirror');
-  if(rtcEnabled){await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'first viewer real P2P').catch(async error=>{console.log('RTC viewer status:',await one.locator('#status').textContent(),'page errors',errors,'rtc',await one.evaluate(()=>globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))));console.log('Offscreen:',offscreenSession?await cdp.evaluate(offscreenSession,'({ready:globalThis.__ready?.(),rtc:typeof RTCPeerConnection,connections:globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))})'):'not created');throw error;});await until(()=>two.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'second viewer real P2P');console.log('PASS: two authenticated real WebRTC connections via',useTURN?'TURN/TCP':'P2P',', DOM and input DataChannels');}
+  if(rtcEnabled){await until(()=>one.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'first viewer real P2P').catch(async error=>{console.log('RTC viewer status:',await one.locator('#status').textContent(),'page errors',errors,'rtc',await one.evaluate(()=>globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))));console.log('Offscreen:',offscreenSession?await cdp.evaluate(offscreenSession,'({ready:globalThis.__ready?.(),rtc:typeof RTCPeerConnection,connections:globalThis.__rtc?.map(p=>({state:p.connectionState,signal:p.signalingState,ice:p.iceGatheringState,local:p.localDescription?.type,remote:p.remoteDescription?.type}))})'):'not created');throw error;});await until(()=>two.locator('#status').textContent().then(t=>t.includes(useTURN?'TURN 中继':'P2P 直连')),'second viewer real P2P');console.log('PASS: two authenticated real WebRTC connections via',useTURN?'built-in Go TURN':'P2P',', DOM and input DataChannels');}
   if(rtcEnabled){
     await cdp.evaluate(offscreenSession,'__rtc[0].close()');
     await until(()=>one.locator('#status').textContent().then(t=>t.includes('WebSocket 兜底')),'RTC failure switches to WebSocket',12000);
@@ -212,7 +212,7 @@ try {
   await new Promise(resolve=>setTimeout(resolve,500));const idle=packets.length;
   await new Promise(resolve=>setTimeout(resolve,700));assert.equal(packets.length,idle,'idle page sends no DOM data');
   await remoteOne.locator('#check').click();await until(()=>state.checked,'native checkbox');
-  await remoteOne.locator('#choice').selectOption('b');await until(()=>state.choice==='b','native select control');assert.equal(state.choiceTrusted,true,'single select commits trusted keyboard input');
+  await remoteOne.locator('#choice').selectOption('b');await until(()=>state.choice==='b','native select control').catch(async error=>{console.log('Select diagnostic:',{choice:state.choice,inputs:receivedInputs.filter(i=>i.action==='select').slice(-3),source:await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({value:document.querySelector("#choice").value,active:document.activeElement?.id})',returnByValue:true}).then(r=>r.result.value),local:await remoteOne.locator('#choice').inputValue()});throw error;});assert.equal(state.choiceTrusted,true,'single select commits trusted keyboard input');
   assert.equal(await remoteOne.locator('#anim').evaluate(e=>getComputedStyle(e).animationName),'pulse','CSS animations play locally');
   await cdp.call('Target.activateTarget',{targetId:sourceTarget.targetId});
   const animationStart=packets.length;
@@ -358,7 +358,7 @@ try {
 } finally {
   clearInterval(videoAnimation);
   await shutdownAgent?.().catch(()=>{});for(const timer of timers)clearInterval(timer);
-  cdp?.close(); await visitors?.close(); await stop(source).catch(() => {}); await stop(server).catch(() => {});await stop(turnFixture).catch(()=>{});
+  cdp?.close(); await visitors?.close(); await stop(source).catch(() => {}); await stop(server).catch(() => {});
   await new Promise(resolve => fixture ? fixture.close(resolve) : resolve());
   await new Promise(resolve=>assets?assets.close(resolve):resolve());
   await rm(temporary, {recursive: true, force: true});

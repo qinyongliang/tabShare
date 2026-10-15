@@ -21,7 +21,7 @@
 
 云机器的管理员策略 `ExtensionInstallBlocklist: ["*"]` 禁止加载自定义扩展，实际加载尝试被拒绝。`WebRtcIPHandling: disable_non_proxied_udp` 也禁止直接 UDP 协商。因此浏览器集成用 Chrome API 适配器运行未经改写的 worker 主体，连接真实 CDP。没有修改系统策略。扩展加载、权限提示、MV3 后台存活及用户电脑环境仍需在允许开发者扩展的 Chrome 中验证。Docker/Caddy 公网部署为可选配置，本任务没有执行公网部署或验证证书签发。
 
-## 0.4 WebRTC 验证
+## 0.4 WebRTC 验证（历史记录）
 
 Go race / vet、14 项 Node 检查、独立 TURN fixture 构建与 vet、tag 工作流 actionlint 和 Compose 配置解析均通过。分别执行了 `TEST_RTC=0 npm run test:e2e` 和 `TEST_TURN=1 npm run test:e2e`，两套完整浏览器检查均通过。
 
@@ -36,3 +36,15 @@ WebRTC 检查运行真实浏览器中的原始 offscreen 模块及 RTCPeerConnec
 - 视频区域元数据按 DOM 文档版本隔离，导航后不会把旧 Canvas 区域覆盖到新文档的文字或富文本节点。
 
 直接 UDP 穿透、真实公网 TURN/coturn 防火墙、原生 tabCapture 授权及 MV3 offscreen 文档生命周期未在此云策略环境验证。原生 tabCapture 路径提供实现，需所有者在允许安装扩展的本机 Chrome 检查；无人值守重开的网址页采用调试视频来源。Compose 的可选 coturn profile 已校验配置，没有在公网启动。
+
+## 0.4.1 同进程 TURN 验证
+
+用正式 Go 服务内置的 Pion TURN 替代独立测试 fixture 和 Compose coturn profile。HTTP、STUN、TURN UDP/TCP、可选 TLS 运行在同一个进程。默认本地开发不启用 TURN；公网 Compose 默认启用并要求提供服务器 IPv4。临时密钥自动持久化，已认证的分享成员自动获得临时 ICE 凭据，重连时重新签发。
+
+Go race 检查通过，新增检查使用真实 TURN 客户端验证 UDP/TCP/TLS 双向报文与实际分配端口、STUN、错误密码/过期/未知账户拒绝、默认私网权限拒绝、端口和分配限制、启动失败回滚、密钥权限和重启复用、访客离开/撤销后的中继清理，以及服务停止后释放监听器。TLS 检查使用测试 CA 校验证书，未关闭校验。重新协商测试验证两端同时收到新凭据。
+
+真实浏览器检查 `TEST_TURN=1 npm run test:e2e` 已通过：两个访客通过同一个 Go 服务的 TURN/TCP 建立原始 RTCPeerConnection，DOM、输入和图片/字体使用 DataChannel，视频使用 RTP 轨道；主动断开后无需所有者操作即可恢复。导航、共享屏幕尺寸、移动端、多访客、局部视频与整页切换、重启重连和撤销均通过。视频样例在 2.1 秒解码 21 帧。首次浏览器运行曾在原生下拉框处超时，增加失败时的源端/输入诊断后，完整重跑通过，未稳定复现；没有修改或跳过下拉框断言。
+
+Go vet、14 项 Node 检查、tag 工作流 actionlint、Compose 配置解析以及 Linux/macOS/Windows 的 amd64/arm64 六种无 CGO 构建均通过。`TEST_RTC=0 npm run test:e2e` 的完整应急传输回归也通过。已重新执行可复用安装脚本，依赖安装和应用构建成功。
+
+本次仍只验证回环地址的中继。公网 IP、NAT 端口映射、安全组、DNS、证书部署及实际用户电脑的扩展权限未在云环境中配置或验证。

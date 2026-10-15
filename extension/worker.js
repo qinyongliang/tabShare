@@ -49,7 +49,7 @@ async function peerLeft(m) {
 }
 async function peerState(m) {
   const p=peers.get(m.sessionId+':'+m.viewerId);if(!p||m.attempt&&p.attempt&&m.attempt!==p.attempt)return;
-  if(m.status==='down')setTimeout(()=>{if(peers.get(m.sessionId+':'+m.viewerId)===p&&!p.direct)schedule(()=>peerJoined(p));},5000);
+  if(m.status==='down')setTimeout(()=>{if(peers.get(m.sessionId+':'+m.viewerId)===p&&!p.direct)transmit({type:'peer-retry',sessionId:m.sessionId,viewerId:m.viewerId});},5000);
   p.direct=m.status==='up';transmit({type:'transport',sessionId:m.sessionId,viewerId:m.viewerId,status:p.direct?'p2p':'fallback'});
   const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);if(!t)return;
   await peerSnapshot(m.sessionId,m.viewerId);

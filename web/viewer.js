@@ -73,6 +73,7 @@ function receive(m,direct=false){
   if(!direct&&peerReady&&['dom','raster','resource','resources'].includes(m.type))return;
   if(m.type==='signal'){if(typeof RTCPeerConnection==='function')void signaling(m.signal).catch(()=>{route='WebSocket 兜底';});return;}
   if(m.type==='video'){videoInfo=m.info;full=!!m.info.full;frame.hidden=full;$('fallback').hidden=!full;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();return;}
+  if(m.type==='ice')rtcServers=m.iceServers||[];
   if(m.type==='joined'){viewerId=m.viewerId;rtcServers=m.iceServers||[];lastViewport=null;queueViewport();}
   if(m.type==='viewport')sharedViewport(m.viewport);
   if(m.type==='ping')send({type:'pong'});

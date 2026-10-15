@@ -98,3 +98,28 @@ func TestICECredentialsAreTemporaryAndSecretNeverSent(t *testing.T) {
 		t.Fatal("invalid signaling accepted")
 	}
 }
+
+func TestPeerRetryRefreshesBothEndpointsICECredentials(t *testing.T) {
+	f := setup(t)
+	f.s.cfg.TURNURLs = []string{"turn:turn.example.com:3478?transport=tcp"}
+	f.s.cfg.TURNSecret = strings.Repeat("a", 32)
+	se, _ := f.create(t, Session{AgentID: "browser-one", Kind: "url", URL: "https://example.com"})
+	a := dial(t, f, "/ws/agent", Message{Type: "hello", Token: f.s.token, AgentID: se.AgentID})
+	readType(t, a, "ready")
+	v := dial(t, f, "/ws/view/"+se.ID, Message{Type: "join", Key: se.Key})
+	joined := readType(t, v, "joined")
+	readType(t, a, "open")
+	readType(t, a, "peer")
+	f.s.mu.Lock()
+	f.s.cfg.TURNSecret = strings.Repeat("b", 32)
+	f.s.mu.Unlock()
+	write(t, a, Message{Type: "peer-retry", SessionID: se.ID, ViewerID: joined.ViewerID})
+	update := readType(t, v, "ice")
+	grant := readType(t, a, "peer")
+	if len(update.ICEServers) != 1 || len(grant.ICEServers) != 1 || update.ICEServers[0].Credential != grant.ICEServers[0].Credential || update.ICEServers[0].Credential == joined.ICEServers[0].Credential {
+		t.Fatal("retry reused stale credentials or did not update both endpoints")
+	}
+	if grant.ViewerID != joined.ViewerID {
+		t.Fatal("retry targeted a different viewer")
+	}
+}

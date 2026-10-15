@@ -5,8 +5,12 @@ services:
       dockerfile: deploy/Dockerfile
     command: ["-public-url", "https://${TABSHARE_DOMAIN:?Set your public hostname}"]
     environment:
-      TABSHARE_TURN_URLS: ${TABSHARE_TURN_URLS:-}
-      TABSHARE_TURN_SECRET: ${TABSHARE_TURN_SECRET:-}
+      TABSHARE_TURN_LISTEN: ${TABSHARE_TURN_LISTEN-0.0.0.0:3478}
+      TABSHARE_TURN_PUBLIC_IP: ${TABSHARE_TURN_PUBLIC_IP:?Set the server public IPv4 address}
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "49160-49359:49160-49359/udp"
     volumes: ["sessions:/data"]
     restart: unless-stopped
   caddy:
@@ -17,25 +21,6 @@ services:
     volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
     restart: unless-stopped
     depends_on: [tabshare]
-  turn:
-    image: coturn/coturn:4.6.3
-    profiles: ["turn"]
-    network_mode: host
-    environment:
-      TABSHARE_DOMAIN: ${TABSHARE_DOMAIN:?Set your public hostname}
-      TABSHARE_TURN_SECRET: ${TABSHARE_TURN_SECRET:-}
-      TABSHARE_TURN_PUBLIC_IP: ${TABSHARE_TURN_PUBLIC_IP:-}
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        [ "$${#TABSHARE_TURN_SECRET}" -ge 32 ] && [ -n "$$TABSHARE_TURN_PUBLIC_IP" ] || { echo "Configure TURN secret (32+ characters) and public IP before enabling turn"; exit 1; }
-        exec turnserver --no-cli --no-tls --no-dtls --fingerprint --use-auth-secret \
-          --static-auth-secret="$$TABSHARE_TURN_SECRET" --realm="$$TABSHARE_DOMAIN" \
-          --external-ip="$$TABSHARE_TURN_PUBLIC_IP" --listening-port=3478 --min-port=49160 --max-port=49359 \
-          --no-multicast-peers --no-loopback-peers --no-tcp-relay --user-quota=4 --total-quota=256 \
-          --denied-peer-ip=10.0.0.0-10.255.255.255 --denied-peer-ip=172.16.0.0-172.31.255.255 \
-          --denied-peer-ip=192.168.0.0-192.168.255.255 --denied-peer-ip=169.254.0.0-169.254.255.255
-    restart: unless-stopped
 volumes:
   sessions:
   caddy-data:

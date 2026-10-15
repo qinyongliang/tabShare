@@ -9,5 +9,5 @@ FROM alpine:3.23
 RUN addgroup -S tabshare && adduser -S -G tabshare tabshare && mkdir /data && chown tabshare:tabshare /data
 COPY --from=build /tabshare /usr/local/bin/tabshare
 USER tabshare
-EXPOSE 8080
+EXPOSE 8080 3478/tcp 3478/udp 5349/tcp
 ENTRYPOINT ["tabshare", "-listen", "0.0.0.0:8080", "-data", "/data"]
