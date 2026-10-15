@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -23,6 +25,52 @@ import (
 	"github.com/coder/websocket"
 	"github.com/pion/turn/v4"
 )
+
+func TestBuiltinTURNInfersAddressWithoutPublicIPConfig(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicURL: "http://127.0.0.1:8080", BuiltinTURN: TURNConfig{Listen: turnAddress(t), AllowPrivatePeers: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(s.Handler())
+	t.Cleanup(func() { s.Close(); h.Close() })
+	f := &fixture{s, h}
+	_, _, _, ice := turnLogin(t, f)
+	if s.cfg.BuiltinTURN.PublicIP != "127.0.0.1" || !strings.HasPrefix(ice.URLs[0], "turn:127.0.0.1:") {
+		t.Fatal("automatic address was not used for relay and ICE")
+	}
+	_ = echoTURN(t, f, ice, "tcp", nil)
+}
+
+func TestTURNAddressDiscoveryRejectsAmbiguousOrUnavailableDNS(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ips  []net.IP
+		err  error
+		want string
+	}{
+		{"single IPv4", []net.IP{net.ParseIP("203.0.113.10")}, nil, "203.0.113.10"},
+		{"duplicate A record", []net.IP{net.ParseIP("203.0.113.10"), net.ParseIP("203.0.113.10")}, nil, "203.0.113.10"},
+		{"multiple hosts", []net.IP{net.ParseIP("203.0.113.10"), net.ParseIP("203.0.113.11")}, nil, ""},
+		{"no IPv4", []net.IP{net.ParseIP("::1")}, nil, ""},
+		{"DNS failure", nil, errors.New("DNS unavailable"), ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := detectTURNIP("tabs.example.com", func(ctx context.Context, network, host string) ([]net.IP, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 5*time.Second || network != "ip4" || host != "tabs.example.com" {
+					t.Fatal("discovery must use a bounded IPv4 lookup of the configured domain")
+				}
+				return test.ips, test.err
+			})
+			if got != test.want || (err != nil) != (test.want == "") {
+				t.Fatalf("unexpected discovered address %q, error %v", got, err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "turn-public-ip") {
+				t.Fatal("discovery error must explain the manual override")
+			}
+		})
+	}
+}
 
 func turnAddress(t *testing.T) string {
 	t.Helper()

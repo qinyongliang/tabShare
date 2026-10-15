@@ -69,6 +69,8 @@ jobs:
           if [[ "$GOOS" == windows ]]; then executable=tabshare.exe; fi
           go build -mod=readonly -trimpath -o "package/$executable" ./cmd/tabshare
           cp README.md package/
+          cp CONTRIBUTING.md package/
+          cp -R docs package/
           printf '%s\n' "ref=$BUILD_REF" "commit=$BUILD_COMMIT" > package/BUILD.txt
           archive="tabshare-$GOOS-$GOARCH"
           if [[ "$GOOS" == windows ]]; then

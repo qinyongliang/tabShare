@@ -60,7 +60,7 @@ async function stop(process) {
 const listen = await freePort();
 const origin = `http://localhost:${listen}`;
 function startServer() {
-  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin,'-stun','',...(useTURN?['-turn-listen','127.0.0.1:'+turnPort,'-turn-public-ip','127.0.0.1','-turn-relay-ip','127.0.0.1','-turn-allow-private-peers']:[])], {cwd: root,env:{...process.env,TABSHARE_TURN_URLS:'',TABSHARE_TURN_SECRET:'',TABSHARE_TURN_LISTEN:'',TABSHARE_TURN_PUBLIC_IP:''}, stdio: ['ignore', 'ignore', 'pipe']});
+  server = spawn(path.join(root, 'bin/tabshare'), ['-listen', `127.0.0.1:${listen}`, '-data', path.join(temporary, 'data'), '-public-url', origin,'-stun','',...(useTURN?['-turn-listen','127.0.0.1:'+turnPort,'-turn-allow-private-peers']:[])], {cwd: root,env:{...process.env,TABSHARE_TURN_URLS:'',TABSHARE_TURN_SECRET:'',TABSHARE_TURN_LISTEN:'',TABSHARE_TURN_PUBLIC_IP:''}, stdio: ['ignore', 'ignore', 'pipe']});
   server.stderr.on('data', data => { serverLog += data.toString(); });
 }
 try {

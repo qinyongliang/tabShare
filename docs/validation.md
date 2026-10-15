@@ -48,3 +48,9 @@ Go race 检查通过，新增检查使用真实 TURN 客户端验证 UDP/TCP/TLS
 Go vet、14 项 Node 检查、tag 工作流 actionlint、Compose 配置解析以及 Linux/macOS/Windows 的 amd64/arm64 六种无 CGO 构建均通过。`TEST_RTC=0 npm run test:e2e` 的完整应急传输回归也通过。已重新执行可复用安装脚本，依赖安装和应用构建成功。
 
 本次仍只验证回环地址的中继。公网 IP、NAT 端口映射、安全组、DNS、证书部署及实际用户电脑的扩展权限未在云环境中配置或验证。
+
+## 文档与默认配置简化
+
+README 按项目介绍、功能、快速开始和贡献入口重写，使用、部署、架构、兼容性和开发说明拆为独立文档。检查了文档的本地链接、锚点和代码块，tag 构建包包含这些文档。
+
+默认 Compose 仅需 `TABSHARE_DOMAIN`，使用新提供的 `deploy/.env.example` 配置解析通过。Go 从域名自动推断 TURN IPv4，保留手动 IP 覆盖；新增检查覆盖单地址、重复地址、多地址、无 IPv4、DNS 错误和解析超时边界，并用自动推断出的地址完成真实 TURN/TCP 双向传输。Go race/vet、工作流 actionlint 通过。完整 `TEST_TURN=1` 浏览器测试不再填写中继 IP 或绑定 IP，也通过了多人控制、资源、视频、视口、重启和撤销检查。公网 DNS/防火墙部署仍未执行。

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/tls"
@@ -43,6 +44,20 @@ func prepareTURN(cfg *Config) error {
 	}
 	if host != "" && (net.ParseIP(host) == nil || net.ParseIP(host).To4() == nil) {
 		return errors.New("TURN listen host must be an IPv4 address")
+	}
+	if c.PublicIP == "" {
+		name := c.Host
+		if name == "" {
+			u, _ := url.Parse(cfg.PublicURL)
+			name = u.Hostname()
+		}
+		c.PublicIP, err = detectTURNIP(name, net.DefaultResolver.LookupIP)
+		if err != nil {
+			return err
+		}
+		if c.Host == "" {
+			c.Host = name
+		}
 	}
 	ip := net.ParseIP(c.PublicIP)
 	if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsMulticast() {
@@ -123,6 +138,29 @@ func prepareTURN(cfg *Config) error {
 		cfg.STUNURLs = append([]string{ownSTUN}, cfg.STUNURLs...)
 	}
 	return nil
+}
+
+// Infer the relay address from the deployment's DNS, without an external IP service.
+// Multiple A records need an explicit address to avoid advertising the wrong host.
+func detectTURNIP(host string, lookup func(context.Context, string, string) ([]net.IP, error)) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := lookup(ctx, "ip4", host)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve TURN IPv4 from %s; check DNS or set turn-public-ip: %w", host, err)
+	}
+	unique := map[string]bool{}
+	address := ""
+	for _, ip := range ips {
+		if v := ip.To4(); v != nil {
+			address = v.String()
+			unique[address] = true
+		}
+	}
+	if len(unique) != 1 {
+		return "", fmt.Errorf("%s must resolve to exactly one TURN IPv4; set turn-public-ip for custom routing", host)
+	}
+	return address, nil
 }
 
 // Peer filtering applies to CreatePermission/ChannelBind and the relay socket itself.

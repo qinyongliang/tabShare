@@ -7,6 +7,6 @@
 - [开发者隐私政策](https://rbu-ong.github.io/Tab-Controller/privacy.html)：共享标签页 screencast 与输入转发；可见的 Chrome 调试提示；短期内存中的房间配对。
 - [Chrome debugger 官方说明](https://developer.chrome.com/docs/extensions/reference/api/debugger)和 [CDP 协议定义](https://github.com/ChromeDevTools/devtools-protocol)：支持按 tab 附加调试连接、页面输入、隔离世界和截图。
 
-TabShare 的需求额外包含无人值守重连、持久分享链接、网址对应会话复用以及多人同时访问。用户进一步选择 DOM 同步优先，并要求只发送差异、限制动画的同步开销，特殊区域可降级为画面，重叠时可降级整页。
+TabShare 的设计目标包括无人值守重连、持久分享链接、网址对应会话复用以及多人同时访问。同步优先使用 DOM 差异，合并动画引起的频繁变化以控制开销；特殊区域可使用视频，重叠时可切换整页画面。
 
-因此普通网页采用“源页运行逻辑 + 安全 DOM 镜像 + 固定输入回传”，不让访客重新独立运行原网站。源页与登录状态仍只有一个。Canvas/跨域 iframe 等无法直接复制的区域使用 WebRTC 视频轨道，在访客端裁剪显示，重叠时显示整个视频视口。DOM 差异、资源和输入使用 WebRTC DataChannel，优先直连；配置 TURN 后支持 WebRTC 中继，连接不可用时保留限速截图与 WebSocket/HTTP 应急传输。Chrome 调试提示不隐藏。该路线与参考工具的全页画面镜像不同，并有 README 中列出的兼容性限制。
+普通网页采用“源页运行逻辑 + 安全 DOM 镜像 + 固定输入回传”，源页和登录状态只有一份。Canvas/跨域 iframe 等区域使用 WebRTC 视频轨道，DOM 差异、资源和输入使用 DataChannel。实现见 [架构文档](architecture.md)，支持范围见 [兼容性文档](compatibility.md)。
