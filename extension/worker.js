@@ -27,7 +27,9 @@ function publish(message) {
   if(members.some(p=>!p.direct)||!members.length)return transmit(message);
   return true;
 }
-function resourceConfig(){return {server:serverOrigin(config.server),pairingToken:config.pairingToken,deliver:async(id,asset,item)=>{
+function relayNeeded(id){const members=roomPeers(id);return !members.length||members.some(p=>!p.direct);}
+function releaseRelayMarks(id){if(relayNeeded(id))return;const b=bindings.get(id),t=b&&targets.get(b.tabId);for(const item of t?.resources?.done.values()||[])item.sent?.delete(id);}
+function resourceConfig(){return {server:serverOrigin(config.server),pairingToken:config.pairingToken,relayNeeded,deliver:async(id,asset,item)=>{
   const members=roomPeers(id),recipients=members.filter(p=>p.direct&&!item.sent.has(id+':'+p.viewerId));
   let sentBytes=0;
   if(recipients.length){
@@ -47,6 +49,7 @@ async function peerJoined(m) {
 async function peerLeft(m) {
   peers.delete(m.sessionId+':'+m.viewerId);
   await offscreen({...m,type:'peer-left'}).catch(()=>{});
+  releaseRelayMarks(m.sessionId);
   const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);
   for(const item of t?.resources?.done.values()||[])item.sent?.delete(m.sessionId+':'+m.viewerId);
   if(t?.viewport?.owner===m.viewerId)await resizeViewport(b.tabId,null);
@@ -55,12 +58,13 @@ async function peerState(m) {
   const p=peers.get(m.sessionId+':'+m.viewerId);if(!p||m.attempt&&p.attempt&&m.attempt!==p.attempt)return;
   if(m.status==='down')setTimeout(()=>{if(peers.get(m.sessionId+':'+m.viewerId)===p&&!p.direct)transmit({type:'peer-retry',sessionId:m.sessionId,viewerId:m.viewerId});},5000);
   p.direct=m.status==='up';transmit({type:'transport',sessionId:m.sessionId,viewerId:m.viewerId,status:p.direct?'p2p':'fallback'});
+  releaseRelayMarks(m.sessionId);
   const b=bindings.get(m.sessionId),t=b&&targets.get(b.tabId);if(!t)return;
   await peerSnapshot(m.sessionId,m.viewerId);
   if(p.direct)await offscreen({type:'send',sessionId:m.sessionId,viewerId:m.viewerId,message:{type:'mode',mode:t.mode,full:!!t.full}});
   publish({type:'viewport',sessionId:m.sessionId,viewport:t.viewport});
   publish({type:'dialog',sessionId:m.sessionId,dialog:t.dialog||null});
-  if(p.direct){const requests=[...t.resources?.done||[]].filter(([,item])=>item.bytes).map(([id])=>({id}));void t.resources?.transfer(requests,t.sessions,resourceConfig());}
+  const requests=[...t.resources?.done||[]].filter(([,item])=>item.bytes).map(([id])=>({id}));void t.resources?.transfer(requests,t.sessions,resourceConfig());
   t.videoGeometry=null;t.nextRaster=0;await raster(b.tabId);
 }
 function peerInput(m) {

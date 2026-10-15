@@ -32,11 +32,14 @@ npm test
 CHROMIUM_PATH=/usr/bin/chromium npm run test:optimizations
 CHROMIUM_PATH=/usr/bin/chromium TEST_RTC=0 npm run test:e2e
 CHROMIUM_PATH=/usr/bin/chromium TEST_TURN=1 npm run test:e2e
+CHROMIUM_PATH=/usr/bin/chromium npm run test:transport
 ```
 
 `CHROMIUM_PATH` 指向本机 Chrome/Chromium 可执行文件。字体资源测试默认使用 Linux DejaVuSans.ttf，可通过 `TEST_FONT_PATH` 指定其他已安装的 TTF。`test:optimizations` 覆盖字体筛选、CSS 单独增删和资源定向刷新；两套完整浏览器测试分别覆盖应急传输，以及同一 Go 进程提供的 TURN/WebRTC 链路。
 
 浏览器测试用 Chrome API 适配器运行原始 worker 主体，连接真实 CDP 和访客页面，运行原始 offscreen 模块及 RTCPeerConnection。它验证控制、同步、视频编解码和中继，不覆盖实际扩展安装、权限提示或 MV3 生命周期。这些需要在允许加载开发者扩展的 Chrome 中人工检查。现有云环境的验证记录见 [validation.md](validation.md)。
+
+`test:optimizations` 还用真实 Canvas MediaStreamTrack 检查原生来源的裁剪像素、整页轨道切换、后台限帧和资源释放；它不验证 tabCapture 授权。`test:transport` 分别建立 1、5、10 名访客的实际 TURN/TCP 连接，共享区域视频，持续发送 DOM 差异和输入，并检查受限 TCP 通道中的资源传输、其他访客响应、重连和队列释放。默认持续 30 秒，可用 `TEST_SOAK_SECONDS=120` 或更长时间运行（最多 86400 秒）；这是受控传输回归，不代表公网容量承诺。
 
 ## 目录结构
 
@@ -57,8 +60,8 @@ docs/            使用、部署与实现文档
 例如，在准备发布的主分支提交上创建并推送标签：
 
 ```sh
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.5.1
+git push origin v0.5.1
 ```
 
 本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。当前工作流上传构建产物，不自动创建 GitHub Release。

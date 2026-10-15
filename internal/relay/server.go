@@ -29,6 +29,7 @@ type Config struct {
 	STUNURLs, TURNURLs []string
 	TURNSecret         string
 	BuiltinTURN        TURNConfig
+	DOMCacheBytes      int
 }
 type Session struct {
 	ID       string `json:"id"`
@@ -150,6 +151,8 @@ type Server struct {
 	live        map[string]*live
 	assets      map[string]*assetBlob
 	assetBytes  int
+	domBytes    int
+	domRejected atomic.Uint64
 	queuedBytes atomic.Int64
 	turn        *builtinTURN
 	turnViewers map[string]bool
@@ -165,6 +168,12 @@ func randomID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 func New(cfg Config) (*Server, error) {
+	if cfg.DOMCacheBytes == 0 {
+		cfg.DOMCacheBytes = 64 << 20
+	}
+	if cfg.DOMCacheBytes < 1 {
+		return nil, errors.New("DOM cache budget must be positive")
+	}
 	u, err := url.Parse(cfg.PublicURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || (u.Path != "" && u.Path != "/") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("public-url must be an HTTP(S) origin")
@@ -407,6 +416,7 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 		delete(s.turnViewers, p.id)
 	}
 	s.clearAssets(s.live[id])
+	s.clearDocument(s.live[id])
 	if len(viewers) == 0 {
 		delete(s.live, id)
 	}
@@ -602,7 +612,7 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.live[sid].dialog = nil
 				s.live[sid].viewport = nil
 				s.broadcast(sid, Message{Type: "viewport"})
-				s.live[sid].document = documentState{}
+				s.clearDocument(s.live[sid])
 				s.live[sid].status = "offline"
 				s.broadcast(sid, Message{Type: "status", Status: "offline", Detail: "共享浏览器已断开，正在等待自动重连"})
 			}
@@ -661,6 +671,10 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
+			if !needsDOMCache(s.live[se.ID]) {
+				s.clearDocument(s.live[se.ID])
+				s.clearAssets(s.live[se.ID])
+			}
 		case "raster":
 			if m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
 				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Full: m.Full})
@@ -682,16 +696,27 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.broadcast(se.ID, Message{Type: "dialog", Dialog: m.Dialog})
 			}
 		case "dom":
-			if len(s.live[se.ID].viewers) == 0 {
+			if !needsDOMCache(s.live[se.ID]) {
 				break
 			}
-			if err := s.live[se.ID].document.apply(m.Document); err == nil {
+			if err := s.applyDocument(s.live[se.ID], m.Document); err == nil {
 				if m.Document.Reset {
 					s.pruneAssets(s.live[se.ID], m.Document.Version)
 				}
 				out := Message{Type: "dom", Document: m.Document}
 				s.live[se.ID].status = "connected"
 				s.broadcast(se.ID, out)
+			} else if errors.Is(err, errDOMBudget) {
+				s.domRejected.Add(1)
+				// Preserve other rooms and direct peers. Fallback visitors already
+				// reconnect automatically and request a fresh source snapshot.
+				s.clearDocument(s.live[se.ID])
+				for viewer := range s.live[se.ID].viewers {
+					if !viewer.direct {
+						viewer.cancel()
+						_ = viewer.conn.CloseNow()
+					}
+				}
 			} else {
 				send(p, Message{Type: "resync", SessionID: se.ID})
 			}
@@ -699,7 +724,7 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			if len(m.Detail) <= 1024 && len(m.URL) <= 8192 && len(m.Title) <= 512 {
 				s.live[se.ID].status = m.Status
 				if m.Status != "connected" {
-					s.live[se.ID].document = documentState{}
+					s.clearDocument(s.live[se.ID])
 				}
 				s.broadcast(se.ID, Message{Type: "status", Status: m.Status, Detail: m.Detail, URL: m.URL, Title: m.Title})
 			}
@@ -759,6 +784,10 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(l.viewers, p)
+		if !needsDOMCache(l) {
+			s.clearDocument(l)
+			s.clearAssets(l)
+		}
 		delete(s.turnViewers, p.id)
 		if s.turn != nil {
 			s.turn.revoke(p.id)
@@ -775,7 +804,7 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 		}
 		s.broadcast(id, Message{Type: "viewers", Viewers: len(l.viewers)})
 		if len(l.viewers) == 0 {
-			l.document = documentState{}
+			s.clearDocument(l)
 			s.clearAssets(l)
 			l.dialog = nil
 			if a := s.agents[se.AgentID]; a != nil {
@@ -916,6 +945,7 @@ func (s *Server) Close() {
 	}
 	for _, l := range s.live {
 		s.clearAssets(l)
+		s.clearDocument(l)
 		for p := range l.viewers {
 			p.cancel()
 			_ = p.conn.CloseNow()

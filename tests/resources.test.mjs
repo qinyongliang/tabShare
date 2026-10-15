@@ -41,3 +41,15 @@ test('overlapping resource requests are deduplicated and disposal cancels budget
   const waiting=bridge.wait(30000);bridge.dispose();await waiting;
   assert.equal(bridge.pendingTransfers.size,0);
 });
+
+test('a discarded relay upload or transport switch cannot leave a stale delivered mark',async()=>{
+  const bridge=new ResourceBridge(async()=>{},async()=>{}),fetch=globalThis.fetch;bridge.scan=async()=>{};bridge.wait=async()=>{};
+  const item={bytes:new Uint8Array([1]),mime:'image/png',sent:new Set()};bridge.done.set('doc_0',item);
+  try{
+    for(const [status,needed,expected] of [[202,true,false],[200,false,false],[201,true,true]]){
+      item.sent.clear();globalThis.fetch=async()=>new Response('{}',{status});
+      await bridge.transfer([{id:'doc_0'}],['room'],{server:'http://localhost',relayNeeded:()=>needed,deliver:async()=>({relay:true,sentBytes:0})});
+      assert.equal(item.sent.has('room'),expected);
+    }
+  }finally{globalThis.fetch=fetch;bridge.dispose();}
+});

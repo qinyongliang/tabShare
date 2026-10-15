@@ -126,6 +126,8 @@ TABSHARE_TURN_PUBLIC_IP=203.0.113.10
 
 ## 运行诊断
 
+默认已启用 64 MiB 的跨会话 DOM 缓存预算；内置 TURN 启用时，中继载荷默认合计最高 50 Mbps，允许小幅短时突发。不需要额外配置。需要调整容量时，可给 Go 增加 `-dom-cache-mib 128` 或 `-turn-max-mbps 20`；Compose 用户可在现有 `command` 中追加这些参数。TURN 超额数据报会被丢弃，客户端可能降低画质或增加操作延迟，因此应按并发需求设值。
+
 `GET /api/stats` 需要在 `Authorization: Bearer <配对令牌>` 中提供管理员配对令牌，返回会话数、在线浏览器/访客数、WebRTC 成员数（含 TURN）、资源字节和 WebSocket 队列字节；启用内置 TURN 时还返回分配数和中继载荷收发字节。接口不返回页面内容、分享链接或密钥。
 
-`domBytes` 表示缓存 DOM 的序列化大小，不是 Go 堆内存。TURN 字节是各中继分配的载荷计数，包含内部中继路径，不能直接当成云厂商计费出站流量；P2P 视频也不经过这些计数器。
+`domBytes` 按节点、CSS 和元数据的序列化字节计账，不是 Go 堆内存；`domCacheLimitBytes` 和 `domCacheRejected` 用于检查缓存压力。`turnMaxMbps`、`turnRelayBytesDropped` 表示中继预算和超额丢弃字节。TURN 字节是各中继分配的载荷计数，包含内部中继路径，不能直接当成云厂商计费出站流量；P2P 视频也不经过这些计数器。

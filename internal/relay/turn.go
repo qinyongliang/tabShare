@@ -28,10 +28,17 @@ type TURNConfig struct {
 	MinPort, MaxPort                int
 	TLSListen, CertFile, KeyFile    string
 	AllowPrivatePeers               bool
+	MaxMbps                         int
 }
 
 func prepareTURN(cfg *Config) error {
 	c := &cfg.BuiltinTURN
+	if c.MaxMbps == 0 {
+		c.MaxMbps = 50
+	}
+	if c.MaxMbps < 1 || c.MaxMbps > 100000 {
+		return errors.New("turn-max-mbps must be between 1 and 100000")
+	}
 	if c.Listen == "" {
 		if c.TLSListen != "" {
 			return errors.New("turn-tls-listen requires turn-listen")
@@ -189,6 +196,8 @@ type builtinTURN struct {
 	closed        bool
 	receivedBytes atomic.Uint64
 	sentBytes     atomic.Uint64
+	droppedBytes  atomic.Uint64
+	bandwidth     *byteBudget
 	relays        map[int]*turnPacket
 	users         map[string]int
 	pending       map[string]turnPending
@@ -230,15 +239,24 @@ func (p *turnPacket) WriteTo(b []byte, a net.Addr) (int, error) {
 	if !ok || !turnPeerAllowed(u.IP, p.manager.cfg.AllowPrivatePeers) {
 		return 0, errors.New("TURN peer address denied")
 	}
+	if !p.manager.bandwidth.allow(len(b), time.Now()) {
+		p.manager.droppedBytes.Add(uint64(len(b)))
+		return len(b), nil
+	}
 	n, err := p.PacketConn.WriteTo(b, a)
 	p.manager.sentBytes.Add(uint64(n))
 	return n, err
 }
 
 func (p *turnPacket) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, a, err := p.PacketConn.ReadFrom(b)
-	p.manager.receivedBytes.Add(uint64(n))
-	return n, a, err
+	for {
+		n, a, err := p.PacketConn.ReadFrom(b)
+		p.manager.receivedBytes.Add(uint64(n))
+		if err != nil || p.manager.bandwidth.allow(n, time.Now()) {
+			return n, a, err
+		}
+		p.manager.droppedBytes.Add(uint64(n))
+	}
 }
 
 type turnGenerator struct{ m *builtinTURN }
@@ -401,6 +419,7 @@ func (s *Server) startTURN() (err error) {
 	}
 	u, _ := url.Parse(s.cfg.PublicURL)
 	m := &builtinTURN{owner: s, cfg: c, realm: u.Hostname(), relays: map[int]*turnPacket{}, users: map[string]int{}, pending: map[string]turnPending{}, connections: map[*turnConn]struct{}{}}
+	m.bandwidth = newByteBudget(int64(c.MaxMbps) * 125000)
 	defer func() {
 		if err != nil {
 			m.close()

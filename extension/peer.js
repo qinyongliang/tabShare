@@ -24,6 +24,12 @@ export async function decodeJSONPacket(bytes,limit=LIMIT){
   }else if(bytes[0]!==1||bytes.length>limit)throw Error('Invalid JSON packet');
   return JSON.parse(new TextDecoder().decode(json));
 }
+export function encodingPolicy(size,profile,network={}){
+  const width=size.width||1920,height=size.height||1080;
+  const down=Math.min(8,Math.max(1,width/profile.width,height/profile.height,width/4096,height/4096,Math.sqrt(width*height/8294400))),pixels=width*height/(down*down);
+  const weak=network.rtt>.3||network.loss>.05||network.encodeMs>35||network.cpu;
+  return {scaleResolutionDownBy:down,maxFramerate:profile.visible?(weak?15:30):2,maxBitrate:profile.visible?Math.round(Math.max(150000,Math.min(4000000,pixels*3,network.available>0?network.available*.8:4000000))):150000};
+}
 export class PeerLink {
   constructor({host=false,iceServers=[],attempt=crypto.randomUUID(),signal,message,asset,track,state,profileChanged}){
     Object.assign(this,{host,attempt,signal,message,asset,state,profileChanged});
@@ -113,17 +119,31 @@ export class PeerLink {
     this.policyDirty=true;if(this.policyTask)return this.policyTask;
     this.policyTask=(async()=>{
       while(this.policyDirty&&!this.closed){this.policyDirty=false;const track=this.sender?.track;if(!track)continue;
-        const size=track.getSettings(),width=size.width||1920,height=size.height||1080,p=this.profile;
-        const down=Math.max(1,width/p.width,height/p.height),pixels=width*height/(down*down),weak=this.network?.rtt>.3;
         const params=this.sender.getParameters();if(!params.encodings?.length)params.encodings=[{}];
-        Object.assign(params.encodings[0],{scaleResolutionDownBy:Math.min(8,down),maxFramerate:p.visible?(weak?15:30):2,maxBitrate:p.visible?Math.max(150000,Math.min(4000000,pixels*3,this.network?.available?this.network.available*.8:4000000)):150000});
+        Object.assign(params.encodings[0],encodingPolicy(track.getSettings(),this.profile,this.network));
         await this.sender.setParameters(params).catch(()=>{});
       }
     })().finally(()=>{this.policyTask=null;if(this.policyDirty&&!this.closed)this.updateVideoPolicy();});return this.policyTask;
   }
   async sampleNetwork(){
     if(this.closed||!this.sender?.track||this.sampling)return;this.sampling=true;
-    try{const stats=await this.pc.getStats();for(const r of stats.values())if(r.type==='candidate-pair'&&r.state==='succeeded'&&(r.nominated||r.selected)){this.network={rtt:r.currentRoundTripTime,available:r.availableOutgoingBitrate};break;}this.updateVideoPolicy();}catch{}finally{this.sampling=false;}
+    try{
+      const reports=await this.pc.getStats(),network={};let encoded,remote;
+      for(const r of reports.values()){
+        if(r.type==='candidate-pair'&&r.state==='succeeded'&&(r.nominated||r.selected))Object.assign(network,{rtt:r.currentRoundTripTime,available:r.availableOutgoingBitrate});
+        if(r.type==='outbound-rtp'&&(r.kind||r.mediaType)==='video')encoded=r;
+        if(r.type==='remote-inbound-rtp'&&(r.kind||r.mediaType)==='video')remote=r;
+      }
+      if(encoded){
+        const previous=this.videoSample,frames=previous?.id===encoded.id?Math.max(0,encoded.framesEncoded-previous.framesEncoded):0;
+        if(frames)network.encodeMs=Math.max(0,(encoded.totalEncodeTime-previous.totalEncodeTime)*1000/frames);
+        network.cpu=encoded.qualityLimitationReason==='cpu';
+        if(remote&&previous?.remote?.id===remote.id){const lost=Math.max(0,remote.packetsLost-previous.remote.packetsLost),sent=Math.max(0,encoded.packetsSent-previous.packetsSent);network.loss=sent?Math.min(1,lost/sent):0;}
+        this.videoSample={...encoded,remote:remote?{id:remote.id,packetsLost:remote.packetsLost}:null};
+        this.stats.video={frames:encoded.framesEncoded,bytes:encoded.bytesSent,encodeMs:network.encodeMs||0,loss:network.loss||0,rtt:network.rtt||0,quality:encoded.qualityLimitationReason||'none'};
+      }
+      this.network=network;this.updateVideoPolicy();
+    }catch{}finally{this.sampling=false;}
   }
   async route(){const stats=await this.pc.getStats();for(const r of stats.values())if(r.type==='transport'&&r.selectedCandidatePairId){const pair=stats.get(r.selectedCandidatePairId),local=stats.get(pair?.localCandidateId),remote=stats.get(pair?.remoteCandidateId);return local?.candidateType==='relay'||remote?.candidateType==='relay'?'TURN 中继':'P2P 直连';}return 'WebRTC';}
   close(){if(this.closed)return;this.closed=true;this.ready=false;clearTimeout(this.timeout);clearTimeout(this.lost);clearTimeout(this.profileTimer);clearInterval(this.policyTimer);for(const done of [...this.waiters])done(false);for(const e of this.channels.values())for(const p of e.parts.values())clearTimeout(p.timer);this.channels.clear();this.pc.close();this.state?.('down');}

@@ -19,6 +19,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
 	data := flag.String("data", ".data", "persistent session and pairing-token directory")
 	public := flag.String("public-url", "http://localhost:8080", "external HTTP(S) URL, without a trailing path")
+	domCache := flag.Int("dom-cache-mib", 64, "total serialized DOM cache budget in MiB")
 	stun := flag.String("stun", "stun:stun.l.google.com:19302", "comma-separated extra STUN URLs; empty disables extra STUN")
 	turn := flag.String("turn", os.Getenv("TABSHARE_TURN_URLS"), "comma-separated TURN URLs")
 	turnListen := flag.String("turn-listen", os.Getenv("TABSHARE_TURN_LISTEN"), "built-in TURN UDP/TCP IPv4 listen address; empty disables")
@@ -27,10 +28,14 @@ func main() {
 	relayIP := flag.String("turn-relay-ip", "", "local relay bind IPv4, defaults to TURN listen host")
 	ports := flag.String("turn-relay-ports", "49160-49359", "built-in TURN UDP relay port range")
 	privatePeers := flag.Bool("turn-allow-private-peers", false, "allow LAN/loopback TURN peers (trusted networks only)")
+	turnMax := flag.Int("turn-max-mbps", 50, "aggregate built-in TURN relay payload budget in Mbps")
 	tlsListen := flag.String("turn-tls-listen", "", "optional built-in TURN TLS listen address")
 	cert := flag.String("turn-cert", "", "TURN TLS certificate PEM path")
 	key := flag.String("turn-key", "", "TURN TLS private key PEM path")
 	flag.Parse()
+	if *domCache < 1 || *domCache > 4096 {
+		log.Fatal("dom-cache-mib must be between 1 and 4096")
+	}
 	bounds := strings.Split(*ports, "-")
 	if len(bounds) != 2 {
 		log.Fatal("invalid turn-relay-ports range")
@@ -41,13 +46,14 @@ func main() {
 		log.Fatal("invalid turn-relay-ports range")
 	}
 	builtin := relay.TURNConfig{Listen: *turnListen, PublicIP: *turnIP, Host: *turnHost, RelayIP: *relayIP, MinPort: minPort, MaxPort: maxPort, AllowPrivatePeers: *privatePeers, TLSListen: *tlsListen, CertFile: *cert, KeyFile: *key}
+	builtin.MaxMbps = *turnMax
 	split := func(value string) []string {
 		if strings.TrimSpace(value) == "" {
 			return nil
 		}
 		return strings.Split(value, ",")
 	}
-	app, err := relay.New(relay.Config{DataDir: *data, PublicURL: *public, STUNURLs: split(*stun), TURNURLs: split(*turn), TURNSecret: os.Getenv("TABSHARE_TURN_SECRET"), BuiltinTURN: builtin})
+	app, err := relay.New(relay.Config{DataDir: *data, PublicURL: *public, DOMCacheBytes: *domCache << 20, STUNURLs: split(*stun), TURNURLs: split(*turn), TURNSecret: os.Getenv("TABSHARE_TURN_SECRET"), BuiltinTURN: builtin})
 	if err != nil {
 		log.Fatal(err)
 	}

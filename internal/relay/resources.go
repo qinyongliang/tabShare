@@ -116,6 +116,13 @@ func (s *Server) resource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "share is no longer active", 409)
 		return
 	}
+	if !needsDOMCache(state) {
+		// A fallback upload can finish after its visitor switched to WebRTC.
+		// Acknowledge without retaining it; 202 tells the source not to cache
+		// an HTTP-delivered mark for a later fallback connection.
+		jsonResponse(w, http.StatusAccepted, meta)
+		return
+	}
 	if old := state.resources[id]; old != nil {
 		if old.SHA256 != hash || old.MIME != kind {
 			http.Error(w, "resource identity is immutable", 409)

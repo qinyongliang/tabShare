@@ -72,7 +72,7 @@ try {
     res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#ea5685"/></svg>');
   });await new Promise(resolve=>assets.listen(0,'127.0.0.1',resolve));assetOrigin=`http://127.0.0.1:${assets.address().port}`;
   fixture = http.createServer(async (req, res) => {
-    if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js','video-layout.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}
+    if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js','video-layout.js','video-capture.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}
     if (req.url === '/event' && req.method === 'POST') {
       let text = ''; for await (const chunk of req) text += chunk;
       Object.assign(state, JSON.parse(text)); res.end('ok'); return;
@@ -327,6 +327,15 @@ try {
   await until(()=>compatibility.locator('#badge').evaluate(e=>[...e.ownerDocument.fonts].some(f=>f.family==='SharedFont'&&f.status==='loaded')),'cross-origin font face loaded',20000).catch(async error=>{console.log('Resource reads:',resourceReads);console.log('Font styles:',await compatibility.locator('#badge').evaluate(e=>({fonts:[...e.ownerDocument.fonts].map(f=>({family:f.family,status:f.status})),styles:[...e.ownerDocument.styleSheets].flatMap(s=>[...s.cssRules].map(r=>r.cssText)).filter(r=>r.includes('font-face'))})));throw error;});
   assert.ok(await compatibility.locator('#background').evaluate(e=>getComputedStyle(e).backgroundImage.startsWith('url("blob:')),'CSS image forwarded');
   if(rtcEnabled)assert.equal(resourceUploads,beforeDirectResources,'cross-origin images and font bytes bypass Go relay');
+  if(rtcEnabled){
+    const emergency=await context.newPage();await emergency.addInitScript(()=>{globalThis.RTCPeerConnection=undefined;});emergency.on('pageerror',e=>errors.push(e.message));
+    await emergency.goto(share.value.shareUrl);
+    await until(()=>emergency.frameLocator('#mirror').locator('#remote-image').evaluate(e=>e.complete&&e.naturalWidth===80),'new fallback visitor receives resources after P2P navigation',35000);
+    await until(()=>emergency.frameLocator('#mirror').locator('#badge').evaluate(e=>[...e.ownerDocument.fonts].some(f=>f.family==='SharedFont'&&f.status==='loaded')),'new fallback visitor receives font');
+    assert.ok(resourceUploads>beforeDirectResources,'fallback restores resources through HTTP');await emergency.close();
+    await until(async()=>{const r=await fetch(origin+'/api/stats',{headers:{Authorization:'Bearer '+token}}).then(r=>r.json());return r.resourceBytes===0&&r.domBytes===0;},'direct-only sessions release server resource and DOM caches');
+    console.log('PASS: new fallback visitor after P2P navigation receives image/font; last fallback departure releases server caches');
+  }
   // The rich editor has no source scripts in the mirror. Range replacement runs trusted input on the source.
   await compatibility.locator('#rich').evaluate(e=>{e.focus();const s=e.ownerDocument.getSelection();s.setBaseAndExtent(e.querySelector('strong').firstChild,2,e.querySelector('em').firstChild,3);});
   await reopened.keyboard.insertText('你好');await until(()=>state.richText==='al你好vo','rich text range spans nested elements');assert.equal(state.trusted,true,'rich text uses trusted CDP editing');

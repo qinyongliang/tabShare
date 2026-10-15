@@ -5,6 +5,8 @@ import (
 	"errors"
 )
 
+var errDOMBudget = errors.New("DOM cache budget exceeded")
+
 type Document struct {
 	Version    string           `json:"version"`
 	Sequence   int              `json:"sequence"`
@@ -30,7 +32,10 @@ type documentState struct {
 	css      string
 	sizes    map[string]int
 	bytes    int
+	auxBytes int
 }
+
+func (state *documentState) retainedBytes() int { return state.bytes + state.auxBytes }
 
 func cloneMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
@@ -40,6 +45,9 @@ func cloneMap(in map[string]any) map[string]any {
 	return out
 }
 func (state *documentState) apply(d *Document) error {
+	return state.applyBudget(d, 4<<20)
+}
+func (state *documentState) applyBudget(d *Document, budget int) error {
 	if d == nil || len(d.Version) > 80 || d.Version == "" || d.Sequence <= 0 || len(d.Root) > 32 || len(d.Nodes) > 3500 || len(d.Updates) > 3500 || len(d.Removes) > 7000 || len(d.CSS) > 100000 {
 		return errors.New("invalid DOM delta")
 	}
@@ -126,8 +134,17 @@ func (state *documentState) apply(d *Document) error {
 	if count > 3500 || removed[d.Root] || lookup(d.Root) == nil {
 		return errors.New("invalid document size or root")
 	}
-	if bytes > 4<<20 {
-		return errors.New("DOM state too large")
+	css := state.css
+	if d.Reset || d.CSSChanged || d.CSS != "" {
+		css = d.CSS
+	}
+	meta, err := json.Marshal(d.Meta)
+	if err != nil {
+		return err
+	}
+	auxBytes := len(meta) + len(css) + len(d.Version) + len(d.Root)
+	if bytes+auxBytes > budget {
+		return errDOMBudget
 	}
 	// Commit validated changes only. Unchanged nodes stay in place and their immutable maps
 	// can still be used by queued messages and late-join snapshots without being copied.
@@ -142,13 +159,12 @@ func (state *documentState) apply(d *Document) error {
 	state.nodes = base
 	state.sizes = sizes
 	state.bytes = bytes
+	state.auxBytes = auxBytes
 	state.version = d.Version
 	state.sequence = d.Sequence
 	state.root = d.Root
 	state.meta = d.Meta
-	if d.Reset || d.CSSChanged || d.CSS != "" {
-		state.css = d.CSS
-	}
+	state.css = css
 	return nil
 }
 func (state *documentState) snapshot() *Document {

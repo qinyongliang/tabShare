@@ -30,3 +30,14 @@ test('large JSON packets compress losslessly with a bounded decoder',async()=>{
  const corrupt=packed.slice();corrupt.fill(0,5);await assert.rejects(decodeJSONPacket(corrupt));
  const small=new Uint8Array([1,...new TextEncoder().encode('{"type":"input"}')]);assert.equal(await compressPacket(small),small);
 });
+
+test('video encoding budgets respond to loss, CPU, RTT, display size and foreground recovery',async()=>{
+ const {encodingPolicy}=await import('../extension/peer.js');
+ const size={width:1920,height:1080},profile={width:960,height:540,visible:true};
+ assert.equal(encodingPolicy(size,profile).scaleResolutionDownBy,2);
+ for(const network of [{loss:.08},{cpu:true},{encodeMs:40},{rtt:.4}])assert.equal(encodingPolicy(size,profile,network).maxFramerate,15);
+ assert.equal(encodingPolicy(size,profile,{available:500000}).maxBitrate,400000);
+ assert.deepEqual(encodingPolicy(size,{...profile,visible:false}),{scaleResolutionDownBy:2,maxFramerate:2,maxBitrate:150000});
+ assert.equal(encodingPolicy(size,profile,{}).maxFramerate,30);
+ assert.equal(encodingPolicy({width:7680,height:4320},{width:4096,height:4096,visible:true}).scaleResolutionDownBy,2,'large native tracks obey the encoded pixel budget');
+});

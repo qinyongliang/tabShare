@@ -10,10 +10,9 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	result := map[string]any{"sessions": len(s.sessions), "agents": len(s.agents), "resourceBytes": s.assetBytes, "websocketQueuedBytes": s.queuedBytes.Load()}
-	viewers, direct, dom := 0, 0, 0
+	viewers, direct := 0, 0
 	for _, live := range s.live {
 		viewers += len(live.viewers)
-		dom += live.document.bytes
 		for peer := range live.viewers {
 			if peer.direct {
 				direct++
@@ -22,7 +21,9 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	result["viewers"] = viewers
 	result["webrtcPeers"] = direct
-	result["domBytes"] = dom
+	result["domBytes"] = s.domBytes
+	result["domCacheLimitBytes"] = s.cfg.DOMCacheBytes
+	result["domCacheRejected"] = s.domRejected.Load()
 	s.mu.Unlock()
 	if s.turn != nil {
 		s.turn.mu.Lock()
@@ -30,6 +31,8 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		s.turn.mu.Unlock()
 		result["turnRelayBytesSent"] = s.turn.sentBytes.Load()
 		result["turnRelayBytesReceived"] = s.turn.receivedBytes.Load()
+		result["turnRelayBytesDropped"] = s.turn.droppedBytes.Load()
+		result["turnMaxMbps"] = s.turn.cfg.MaxMbps
 	}
 	jsonResponse(w, 200, result)
 }

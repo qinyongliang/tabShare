@@ -8,7 +8,8 @@ import {DocumentState} from '../extension/document-state.js';
 const font=await readFile(process.env.TEST_FONT_PATH||'/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf');
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgH8AAAAASUVORK5CYII=','base64');
 const hits=[];
-const server=http.createServer((req,res)=>{
+const server=http.createServer(async(req,res)=>{
+ if(['/extension/video-capture.js','/extension/video-layout.js'].includes(req.url)){res.setHeader('Content-Type','text/javascript');res.end(await readFile(new URL('..'+req.url,import.meta.url)));return;}
  hits.push(req.url);
  if(req.url==='/font.ttf'){res.setHeader('Content-Type','font/ttf');res.end(font);return;}
  if(req.url==='/image.png'){res.setHeader('Content-Type','image/png');res.end(png);return;}
@@ -51,4 +52,27 @@ try{
  assert.ok(result.writes<=3,'resource arrival must not rewrite unrelated styles');assert.equal(result.intact,true);assert.ok(result.photo.startsWith('blob:'));assert.ok(result.background.includes('blob:'));assert.equal(result.pruned,true);
  console.log('PASS: targeted resource refresh:',result.nodes,'nodes,',result.writes,'style writes,',result.ms.toFixed(2),'ms; local input preserved');
  bridge.dispose();
+ await source.bringToFront();
+ const native=await source.evaluate(async()=>{
+   const {NativeCapture}=await import('/extension/video-capture.js'),{videoLayout}=await import('/extension/video-layout.js');
+   const source=document.createElement('canvas');source.width=640;source.height=360;document.body.append(source);
+   const paint=()=>{const ctx=source.getContext('2d');ctx.fillStyle='blue';ctx.fillRect(0,0,640,360);ctx.fillStyle='red';ctx.fillRect(100,50,100,60);};paint();
+   const timer=setInterval(paint,32),raw=source.captureStream(30).getVideoTracks()[0],c=new NativeCapture(raw);
+   const layout=videoLayout({width:640,height:360,scrollX:0,scrollY:0,full:false,regions:[{id:'a',x:100,y:50,width:100,height:60}]});
+   try{
+     c.setLayout(layout);c.setActive(true);
+     const end=performance.now()+5000;while(c.canvas.width!==100&&performance.now()<end)await new Promise(resolve=>setTimeout(resolve,25));
+     const region={width:c.canvas.width,height:c.canvas.height,pixel:[...c.canvas.getContext('2d').getImageData(20,20,1,1).data],cropped:c.track!==raw};
+     c.setLayout(videoLayout({...layout,full:true}));const direct=c.track===raw;
+     c.setLayout(layout);c.setFPS(2);let frames=0;const request=c.cropped.requestFrame.bind(c.cropped);c.cropped.requestFrame=()=>{frames++;request();};
+     await new Promise(resolve=>setTimeout(resolve,2200));const hiddenFrames=frames;
+     c.setActive(false);const paused=!raw.enabled&&!c.cropped.enabled;
+     const before=frames;await new Promise(resolve=>setTimeout(resolve,250));const idle=frames===before;
+     c.setFPS(30);c.setActive(true);await new Promise(resolve=>setTimeout(resolve,100));c.stop();
+     return {region,direct,hiddenFrames,paused,idle,released:raw.readyState==='ended'&&c.cropped.readyState==='ended'&&c.video.srcObject===null};
+   }finally{clearInterval(timer);c.stop();source.remove();}
+ });
+ assert.deepEqual(native.region,{width:100,height:60,pixel:[255,0,0,255],cropped:true});assert.equal(native.direct,true);
+ assert.ok(native.hiddenFrames>=1&&native.hiddenFrames<=6,'background native frames stay bounded');assert.ok(native.paused&&native.idle&&native.released);
+ console.log('PASS: native MediaStreamTrack region pixels, direct full-frame switching, background frames, pause and track cleanup');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

@@ -78,7 +78,8 @@ export class ResourceBridge {
           if(!relay||item.sent.has(id))continue;
           const response=await fetch(config.server+'/api/resources/'+encodeURIComponent(id)+'/'+encodeURIComponent(request.id),{method:'POST',headers:{Authorization:'Bearer '+config.pairingToken,'Content-Type':item.mime||'application/octet-stream'},body:item.bytes,signal:this.controller.signal});
           if(!response.ok)throw new Error('Resource relay rejected upload');
-          item.sent.add(id);sentBytes+=item.bytes.length;
+          if(response.status!==202&&(!config.relayNeeded||config.relayNeeded(id)))item.sent.add(id);else item.sent.delete(id);
+          sentBytes+=item.bytes.length;
         }
         // Cached no-op deliveries consume no bandwidth budget or wait time.
         if(sentBytes)await this.wait(Math.min(30000,sentBytes/262144*1000));
