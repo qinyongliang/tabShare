@@ -16,6 +16,14 @@ test('late join cache merges styles, deleted attributes, children and CSS withou
  state.apply({version:'v1',sequence:3,root:'a',updates:[],css:'',cssChanged:true});assert.equal(state.snapshot().css,'','late joins retain CSS deletion');
  state.apply({reset:true,version:'v2',sequence:1,root:'z',nodes:[{id:'z'}],meta:{width:300}});assert.deepEqual(state.snapshot().nodes,[{id:'z'}]);
 });
+
+test('packet-local pooled styles expand for late joins and preserve property deletions',()=>{
+ const state=new DocumentState(),style={color:'red',width:'10px'};
+ const packet={version:'pool',reset:true,sequence:1,root:'1',styles:[style],nodes:[{id:'1',tag:'body',styleRef:0}]};state.apply(packet);
+ assert.deepEqual(state.snapshot().nodes[0].style,style);assert.equal(packet.nodes[0].style,undefined);assert.equal(state.snapshot().nodes[0].styleRef,undefined);
+ state.apply({version:'pool',sequence:2,root:'1',styles:[{color:'blue',width:null}],updates:[{id:'1',changes:{styleRef:0}}]});assert.deepEqual(state.snapshot().nodes[0].style,{color:'blue'});
+ assert.throws(()=>state.apply({version:'pool',sequence:3,root:'1',updates:[{id:'1',changes:{styleRef:0}}]}),/reference/);
+});
 test('extension and viewer ship the same peer protocol',async()=>{
  assert.equal(await readFile(new URL('../extension/draggable.js',import.meta.url),'utf8'),await readFile(new URL('../web/draggable.js',import.meta.url),'utf8'));
  assert.equal(await readFile(new URL('../extension/peer.js',import.meta.url),'utf8'),await readFile(new URL('../web/peer.js',import.meta.url),'utf8'));

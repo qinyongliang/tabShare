@@ -2,14 +2,14 @@ import {draggable} from './draggable.js';
 import {caretPosition,selectionState} from './caret.js';
 // The code below runs only in an isolated world of the explicitly shared tab.
 function bootstrap(draggable,caretPosition,selectionState) {
-  if(globalThis.__tabShareDOM&&!globalThis.__tabShareDOM.disposed){if(globalThis.__tabShareDOM.format===3)return;globalThis.__tabShareDOM.dispose?.();}
-  const ids = new WeakMap(), nodes = new Map(), previous = new Map(), sizes=new Map(),dirty = new Set(), subtrees=new Set(), controls=new Set(), observed=new WeakSet(), listeners=[];
+  if(globalThis.__tabShareDOM&&!globalThis.__tabShareDOM.disposed){if(globalThis.__tabShareDOM.format===4)return;globalThis.__tabShareDOM.dispose?.();}
+  const ids = new WeakMap(), nodes = new Map(), previous = new Map(), sizes=new Map(),dirty = new Set(), priority=new Set(),subtrees=new Set(), controls=new Set(), observed=new WeakSet(), listeners=[];
   const resources=new Map(), requests=[], closedRoots=new WeakMap(), extraCSS=new Map(), failedResources=new Set(),resourceUsers=new Map(),nodeAssets=new Map(),failedNodes=new Set();
   const blobDownloads=new Map(),downloadRequests=[];
   function downloadBlob(url){if(!url.startsWith('blob:'))throw Error('Unsupported download source');if(!blobDownloads.has(url)){if(blobDownloads.size>=2)blobDownloads.delete(blobDownloads.keys().next().value);const job=fetch(url).then(r=>r.blob()).then(blob=>{if(blob.size>64*1024*1024)throw Error('Download exceeds 64 MiB');return blob;});job.catch(()=>{});blobDownloads.set(url,job);}return blobDownloads.get(url);}
   listen(document,'tabshare-download',e=>{try{const value=JSON.parse(e.detail);if(typeof value.url==='string'&&value.url.length<2048&&value.url.startsWith('blob:')){downloadBlob(value.url);downloadRequests.push({url:value.url,suggestedFilename:String(value.suggestedFilename||'download').slice(0,200)});if(downloadRequests.length>4)downloadRequests.shift();mark(document.body);if(remoteInputActive)e.preventDefault();}}catch{}});
   listen(document,'click',e=>{const link=e.target.closest?.('a[download]');if(link?.href.startsWith('blob:'))try{downloadBlob(link.href);downloadRequests.push({url:link.href,suggestedFilename:link.download||'download'});if(downloadRequests.length>4)downloadRequests.shift();mark(document.body);if(remoteInputActive)e.preventDefault();}catch{};});
-  let remoteInputActive=false,mode="dom", lastCSS="", widget,widgetRoot,widgetDrag,baseline,ownerViewport,rootStyleDirty=true,rootCSS='';
+  let remoteInputActive=false,mode="dom", lastCSS="", widget,widgetRoot,widgetDrag,baseline,ownerViewport,rootStyleDirty=true,cssDirty=true,rootCSS='',wakeQueued=false,wakeUrgent=false,disposed=false,lastStyleChange=-Infinity;
   let next = 0, first = true, sequence = 0, truncated = false, imageBytes=0, lastControlCheck=0,lastCapture=Date.now(),rootNode,retainedBytes=0,contextMenu,imagePasteCount=0;
   const version = typeof crypto.randomUUID==='function'?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('');
   const properties=[];
@@ -20,6 +20,13 @@ function bootstrap(draggable,caretPosition,selectionState) {
   const forbidden = new Set(['SCRIPT','STYLE','LINK','META','BASE','NOSCRIPT','TEMPLATE']);
   const unsupported = new Set(['IFRAME','FRAME','OBJECT','EMBED','CANVAS','VIDEO','AUDIO']);
   const observers = [], styleRoots=new Set(), loadedURLs=new Set(), usedFonts=new Set();
+  function wake(urgent=false){
+    if(disposed||typeof globalThis.__tabShareWake!=='function')return;
+    wakeUrgent||=urgent;if(wakeQueued)return;wakeQueued=true;
+    // Page timers can be throttled in background tabs. Signal in a microtask;
+    // the extension coalesces frames and owns the network/animation budgets.
+    queueMicrotask(()=>{wakeQueued=false;if(disposed)return;const priority=wakeUrgent;wakeUrgent=false;try{globalThis.__tabShareWake(JSON.stringify({version,urgent:priority}));}catch{}});
+  }
   // Computed styles have no live CSS selectors in the mirror. Track state-rule
   // matches so editing a control also invalidates its labels/ancestor pseudos.
   // Only changed matches are serialized; selector work is coalesced and budgeted.
@@ -28,12 +35,12 @@ function bootstrap(draggable,caretPosition,selectionState) {
   function invalidateState(mask){for(const rules of stateRules.values())for(const rule of rules.values())if(rule.mask&mask)stateQueue.add(rule);}
   function controlState(node){return [node.matches?.(':placeholder-shown'),node.matches?.(':empty'),node.checked,node.indeterminate,node.selectedIndex,node.validity?.valid,node.validity?.rangeUnderflow,node.validity?.rangeOverflow].join(':');}
   function checkControl(node){const state=controlState(node);if(controlStates.get(node)!==state){controlStates.set(node,state);invalidateState(1|8);}}
-  function stateEvent(event){mark(event.target);if(event.type==='input'||event.type==='change')checkControl(event.target);else if(event.type!=='scroll')invalidateState(1|2|8);if(event.target?.type==='radio')for(const n of event.target.getRootNode().querySelectorAll('input[type=radio]')){mark(n);checkControl(n);}}
+  function stateEvent(event){mark(event.target);if(dirty.has(event.target))priority.add(event.target);if(event.type==='input'||event.type==='change')checkControl(event.target);else if(event.type!=='scroll')invalidateState(1|2|8);if(event.target?.type==='radio')for(const n of event.target.getRootNode().querySelectorAll('input[type=radio]')){mark(n);checkControl(n);}wake(true);}
   function trackRule(selector,root){
     const mask=stateMask(selector);if(!mask)return;
     selector=selector.replace(/::(?:before|after|backdrop)\b/g,'');
     let rules=stateRules.get(root);if(!rules){rules=new Map();stateRules.set(root,rules);}
-    let rule=rules.get(selector);if(!rule){rule={selector,root,mask,matches:new Set()};rules.set(selector,rule);stateQueue.add(rule);}rule.epoch=cssEpoch;
+    let rule=rules.get(selector);if(!rule){let matches;try{matches=new Set(root.querySelectorAll(selector));}catch{matches=new Set();}rule={selector,root,mask,matches};rules.set(selector,rule);}rule.epoch=cssEpoch;
   }
   function refreshState(){
     const started=performance.now();
@@ -60,28 +67,36 @@ function bootstrap(draggable,caretPosition,selectionState) {
   function observe(root) {
     if(observed.has(root))return;observed.add(root);if(root instanceof ShadowRoot)styleRoots.add(root);
     const observer = new MutationObserver(records => {
-      let changed=false;
-      for (const record of records) {if(record.target===widget||record.target.parentElement?.closest('[data-tabshare-owner-ui]'))continue;mark(record.target, record.type === 'attributes'&&['class','style','hidden','data-empty','data-state','data-placeholder','aria-expanded'].includes(record.attributeName));changed=true;}
-      if(changed)invalidateState(15);
+      let changed=false,urgent=false;
+      for (const record of records) {
+        const element=record.target.nodeType===3?record.target.parentElement:record.target;
+        if(element===widget||element?.closest?.('[data-tabshare-owner-ui]'))continue;
+        const children=[...record.addedNodes,...record.removedNodes];
+        // A title is metadata, not a reason to recapture the entire body.
+        if(element?.closest?.('title')||record.type==='childList'&&children.length&&children.every(n=>n.nodeName==='TITLE')){wake(true);continue;}
+        if(element?.closest?.('style,link')||children.some(n=>n.nodeType===1&&(n.matches('style,link')||n.querySelector('style,link'))))cssDirty=true;
+        mark(record.target,record.type==='attributes'&&['class','style','hidden','data-empty','data-state','data-placeholder','aria-expanded'].includes(record.attributeName));changed=true;urgent||=record.type!=='attributes'||record.attributeName!=='style';
+      }
+      if(changed){invalidateState(15);const now=performance.now();if(!urgent){urgent=now-lastStyleChange>35;lastStyleChange=now;}wake(urgent);}
     });
     observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true}); observers.push(observer);
   }
   function listen(target,type,fn,capture=true){target.addEventListener(type,fn,capture);listeners.push([target,type,fn,capture]);}
-  function dispose(){for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();subtrees.clear();stateRules.clear();stateQueue.clear();blobDownloads.clear();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
+  function dispose(){disposed=true;for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();priority.clear();subtrees.clear();stateRules.clear();stateQueue.clear();blobDownloads.clear();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
   observe(document.documentElement);
   for (const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle']) listen(document,type,stateEvent);
-  listen(document,'load',e=>{if(['LINK','STYLE'].includes(e.target.tagName)){rootStyleDirty=true;mark(document.body,true);}else if(['IMG','VIDEO','IFRAME'].includes(e.target.tagName)){mark(e.target.parentElement,true);for(let n=e.target.parentElement;n;n=n.parentElement)mark(n);}});
-  if(document.fonts)listen(document.fonts,'loadingdone',()=>{rootStyleDirty=true;mark(document.body,true);});
+  listen(document,'load',e=>{if(['LINK','STYLE'].includes(e.target.tagName)){cssDirty=true;rootStyleDirty=true;mark(document.body,true);}else if(['IMG','VIDEO','IFRAME'].includes(e.target.tagName)){mark(e.target.parentElement,true);for(let n=e.target.parentElement;n;n=n.parentElement)mark(n);}wake(true);});
+  if(document.fonts)listen(document.fonts,'loadingdone',()=>{cssDirty=true;rootStyleDirty=true;mark(document.body,true);wake(true);});
   listen(document,'paste',e=>{if(e.clipboardData?.files.length)imagePasteCount++;});
   let contextSequence=0,contextEvent;
   listen(globalThis,'contextmenu',e=>{if(e.target===widget)return;contextEvent=e;const sequence=++contextSequence;queueMicrotask(()=>{if(contextEvent===e){contextMenu={sequence,custom:e.defaultPrevented};mark(document.body);}});});
   listen(globalThis,'contextmenu',e=>{if(contextEvent!==e)return;contextMenu={sequence:contextSequence,custom:e.defaultPrevented};contextEvent=null;e.preventDefault();mark(document.body);},false);
-  listen(document,'selectionchange',()=>mark(document.activeElement));
-  listen(globalThis,'scroll',()=>mark(document.body));
-  listen(globalThis,'resize',()=>{rootStyleDirty=true;mark(document.body,true);});
+  listen(document,'selectionchange',()=>{mark(document.activeElement);wake(true);});
+  listen(globalThis,'scroll',()=>{mark(document.body);wake(true);});
+  listen(globalThis,'resize',()=>{rootStyleDirty=true;mark(document.body,true);wake(true);});
   let dprQuery;function changedDPR(){watchDPR();mark(document.body,true);}function watchDPR(){dprQuery?.removeEventListener('change',changedDPR,true);dprQuery=matchMedia('(resolution: '+devicePixelRatio+'dppx)');listen(dprQuery,'change',changedDPR);}watchDPR();
-  for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(document,type,()=>invalidateState(4));
-  for(const type of ['transitionend','transitioncancel'])listen(document,type,e=>mark(e.target,true));
+  for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(document,type,()=>{invalidateState(4);wake(true);});
+  for(const type of ['transitionend','transitioncancel'])listen(document,type,e=>{mark(e.target,true);wake(true);});
   function resource(url,kind='image',base=location.href) {
     try {
       const u=new URL(url,base);if(!['http:','https:','blob:','data:'].includes(u.protocol))return '';
@@ -95,7 +110,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
     return value.replace(/url\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^)]*?))\s*\)/gi,(_,a,b,c)=>{const raw=(a??b??c).replace(/\\(?:([0-9a-f]{1,6})\s?|([\s\S]))/gi,(_,hex,char)=>hex?String.fromCodePoint(Math.min(0x10ffff,parseInt(hex,16))||0xfffd):char);try{const u=new URL(raw,base),here=new URL(location.href);if(u.hash&&u.origin===here.origin&&u.pathname===here.pathname&&u.search===here.search)return 'url("'+u.hash+'")';}catch{}return 'url("'+(visible?resource(raw,kind,base):'')+'")';});
   }
   function fontNames(value) {return value.split(',').map(v=>v.trim().replace(/^['"]|['"]$/g,'').toLowerCase());}
-  function styleOf(computed,visible=true) {if(visible)for(const name of fontNames(computed.fontFamily))usedFonts.add(name);const style={};for(const name of properties){const v=computed.getPropertyValue(name);if(v&&v!==baseline?.[name]&&!(followsColor(name)&&v===computed.color))style[name]=rewrite(v,location.href,'image',visible);}return style;}
+  function styleOf(computed,visible=true) {if(visible)for(const name of fontNames(computed.fontFamily))if(!usedFonts.has(name)){usedFonts.add(name);cssDirty=true;}const style={};for(const name of properties){const v=computed.getPropertyValue(name);if(v&&v!==baseline?.[name]&&!(followsColor(name)&&v===computed.color))style[name]=rewrite(v,location.href,'image',visible);}return style;}
   function readRules(list,base,out,root=document) {
     for(const rule of list){
       if(rule.selectorText)trackRule(rule.selectorText,root);
@@ -109,13 +124,13 @@ function bootstrap(draggable,caretPosition,selectionState) {
       else if(rule.cssRules)readRules(rule.cssRules,base,out,root);
     }
   }
-  function addStyles(css,url) {try{const sheet=new CSSStyleSheet();sheet.replaceSync(css);extraCSS.set(url,{sheet,base:url});mark(document.body,true);}catch{}}
+  function addStyles(css,url) {try{const sheet=new CSSStyleSheet();sheet.replaceSync(css);extraCSS.set(url,{sheet,base:url});cssDirty=true;mark(document.body,true);wake(true);}catch{}}
   function registerShadow(host,root) {
     if(!host||host===widget||closedRoots.get(host)===root)return;
-    closedRoots.set(host,root);observe(root);mark(host,true);
+    closedRoots.set(host,root);observe(root);cssDirty=true;mark(host,true);
     for(const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle'])listen(root,type,stateEvent);
-    for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(root,type,()=>invalidateState(4));
-    for(const type of ['transitionend','transitioncancel'])listen(root,type,e=>mark(e.target,true));
+    for(const type of ['mouseover','mouseout','mousedown','mouseup'])listen(root,type,()=>{invalidateState(4);wake(true);});
+    for(const type of ['transitionend','transitioncancel'])listen(root,type,e=>{mark(e.target,true);wake(true);});
   }
   function setMode(value) {
     if(value!=='dom'||mode===value)return;
@@ -162,7 +177,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
     return Object.keys(changes).length?changes:null;
   }
   function cssAnimations() {
-    cssEpoch++;
+    cssEpoch++;cssDirty=false;
     if(rootStyleDirty){const computed=getComputedStyle(document.documentElement),names=['display','font-size','font-family','line-height','direction','writing-mode','color-scheme','background-color','color','scrollbar-width','scrollbar-color','scrollbar-gutter','zoom','position','transform','transform-origin','perspective','perspective-origin','filter','contain','isolation','padding','margin','border','box-sizing','overflow','overflow-x','overflow-y'];rootCSS=':root{'+names.map(name=>name+':'+rewrite(computed.getPropertyValue(name))).join(';')+'}';rootStyleDirty=false;}
     const rules=[rootCSS,':where([data-node-id]),:where([data-node-id])::before,:where([data-node-id])::after,:where([data-node-id])::backdrop{'+Object.entries(baseline||{}).filter(([,v])=>v).map(([k,v])=>k+':'+v).join(';')+'}'];
     for(const root of [...styleRoots])if(!root.host.isConnected)styleRoots.delete(root);
@@ -174,7 +189,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
   function capture() {
     lastCapture=Date.now();
     if(!document.body)return null;
-    if(rootNode!==document.body){rootNode=document.body;first=true;previous.clear();sizes.clear();nodeAssets.clear();resourceUsers.clear();failedNodes.clear();retainedBytes=0;dirty.clear();subtrees.clear();truncated=false;}
+    if(rootNode!==document.body){rootNode=document.body;first=true;previous.clear();sizes.clear();nodeAssets.clear();resourceUsers.clear();failedNodes.clear();retainedBytes=0;dirty.clear();priority.clear();subtrees.clear();truncated=false;}
     if(first){dirty.add(document.body);subtrees.add(document.body);}
     if(Date.now()-lastControlCheck>1000){
       lastControlCheck=Date.now();
@@ -185,7 +200,8 @@ function bootstrap(draggable,caretPosition,selectionState) {
     const hadWork=dirty.size>0, fresh=[],updates=[],removes=[];
     let count=0,packetBytes=0;const started=performance.now();
     // Shallow nodes make capture resumable: expensive trees never monopolize the tab.
-    for(const node of dirty){
+    while(dirty.size){
+      const node=(priority.size?priority:dirty).values().next().value;priority.delete(node);
       dirty.delete(node);const deep=subtrees.delete(node);
       if(!node.isConnected||!allowed(node)||node===document.documentElement||node===document.head)continue;
       const id=idFor(node),old=previous.get(id);
@@ -225,19 +241,26 @@ function bootstrap(draggable,caretPosition,selectionState) {
       for(const asset of nodeAssets.get(id)||[])resourceUsers.get(asset)?.delete(id);
       const assets=new Set(encoded.match(/ts-asset:[A-Za-z0-9_-]+/g)?.map(v=>v.slice(9))||[]);nodeAssets.set(id,assets);failedNodes.delete(id);
       for(const asset of assets){if(!resourceUsers.has(asset))resourceUsers.set(asset,new Set());resourceUsers.get(asset).add(id);if(failedResources.has(asset))failedNodes.add(id);}
-      const changes=difference(old,value);if(!old){fresh.push(value);packetBytes+=bytes;}else if(changes){updates.push({id,changes});packetBytes+=JSON.stringify(changes).length;}
+      const changes=difference(old,value);if(!old){fresh.push({...value});packetBytes+=bytes;}else if(changes){updates.push({id,changes});packetBytes+=JSON.stringify(changes).length;}
       if(++count>=300||packetBytes>=160000||performance.now()-started>=24)break;
     }
     if(hadWork)for(const [id,node] of nodes)if(!node.isConnected){nodes.delete(id);for(const asset of nodeAssets.get(id)||[]){const users=resourceUsers.get(asset);users?.delete(id);if(!users?.size)resourceUsers.delete(asset);}nodeAssets.delete(id);failedNodes.delete(id);if(previous.delete(id)){removes.push(id);retainedBytes-=sizes.get(id)||0;sizes.delete(id);controls.delete(node);}}
     meta.truncated=truncated;
     const result={version,sequence:sequence+1,reset:first,root:idFor(document.body),nodes:fresh,updates,removes,meta};
-    if(first||hadWork){const css=cssAnimations();if(first||css!==lastCSS){result.css=css;result.cssChanged=true;lastCSS=css;}}
+    if(first||cssDirty||rootStyleDirty){const css=cssAnimations();if(first||css!==lastCSS){result.css=css;result.cssChanged=true;lastCSS=css;}}
     meta.pending=dirty.size>0||stateQueue.size>0;
     if(requests.length)result.resources=requests.splice(0);
     if(downloadRequests.length)result.downloads=downloadRequests.splice(0);
     first=false;
     if(!fresh.length&&!updates.length&&!removes.length&&!result.cssChanged&&!result.resources?.length&&!result.downloads?.length&&JSON.stringify(meta)===globalThis.__tabShareLastMeta)return null;
-    sequence++;globalThis.__tabShareLastMeta=JSON.stringify(meta);return result;
+    sequence++;globalThis.__tabShareLastMeta=JSON.stringify(meta);
+    // Pool repeated computed styles inside this packet. References are local to
+    // the packet, so late joins, navigation and independent transports need no cache negotiation.
+    const pool=new Map();
+    for(const value of [...fresh,...updates.map(u=>u.changes)])if(value.style){const key=JSON.stringify(value.style);if(key.length<96)continue;let entry=pool.get(key);if(!entry){entry=[];pool.set(key,entry);}entry.push(value);}
+    const styles=[];for(const entries of pool.values())if(entries.length>1){const index=styles.length;styles.push(entries[0].style);for(const value of entries){delete value.style;value.styleRef=index;}}
+    if(styles.length)result.styles=styles;
+    return result;
   }
   function limit(){globalThis.__tabShareDOM.reset();}
   function act(input) {
@@ -314,9 +337,9 @@ function bootstrap(draggable,caretPosition,selectionState) {
       return images;
     }finally{image.close();}
   }
-  globalThis.__tabShareDOM={format:3,cropFrame,async downloadPart(url,offset){const blob=await downloadBlob(url),bytes=new Uint8Array(await blob.slice(offset,offset+262144).arrayBuffer());let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),size:blob.size,mime:blob.type};},downloadDone(url){blobDownloads.delete(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
+  globalThis.__tabShareDOM={format:4,cropFrame,async downloadPart(url,offset){const blob=await downloadBlob(url),bytes=new Uint8Array(await blob.slice(offset,offset+262144).arrayBuffer());let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),size:blob.size,mime:blob.type};},downloadDone(url){blobDownloads.delete(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
     try{const bytes=Uint8Array.from(atob(input.data),c=>c.charCodeAt(0));let blob=new Blob([bytes],{type:input.mime});if(input.mime!=='image/png'){const image=await createImageBitmap(blob);if(image.width*image.height>16777216){image.close();return false;}const canvas=new OffscreenCanvas(image.width,image.height);canvas.getContext('2d').drawImage(image,0,0);image.close();blob=await canvas.convertToBlob({type:'image/png'});}await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);return true;}catch{return false;}
-  },get imagePasteCount(){return imagePasteCount;},ownerViewport(value){ownerViewport=value;widgetDrag?.resize();},capture,act,fallback,dispose,registerShadow,addStyles,setMode,limit,loadedResources(urls){let changed=false;for(const url of urls)if(!loadedURLs.has(url)){loadedURLs.add(url);changed=true;}if(changed)mark(document.body);},invalidate(){rootStyleDirty=true;mark(document.body,true);},resourceFailed(id){failedResources.add(id);for(const nodeId of resourceUsers.get(id)||[]){failedNodes.add(nodeId);mark(nodes.get(nodeId));}},disposed:false,reset(){widget?.style.removeProperty('pointer-events');first=true;previous.clear();sizes.clear();retainedBytes=0;nodeAssets.clear();resourceUsers.clear();failedNodes.clear();truncated=false;dirty.clear();subtrees.clear();lastCapture=Date.now();}};
+  },get imagePasteCount(){return imagePasteCount;},ownerViewport(value){ownerViewport=value;widgetDrag?.resize();},capture,act,fallback,dispose,registerShadow,addStyles,setMode,limit,loadedResources(urls){let changed=false;for(const url of urls)if(!loadedURLs.has(url)){loadedURLs.add(url);changed=true;}if(changed){cssDirty=true;mark(document.body);wake(true);}},invalidate(){rootStyleDirty=true;cssDirty=true;mark(document.body,true);wake(true);},resourceFailed(id){failedResources.add(id);for(const nodeId of resourceUsers.get(id)||[]){failedNodes.add(nodeId);mark(nodes.get(nodeId));}},disposed:false,reset(){widget?.style.removeProperty('pointer-events');first=true;previous.clear();sizes.clear();retainedBytes=0;nodeAssets.clear();resourceUsers.clear();failedNodes.clear();truncated=false;dirty.clear();priority.clear();subtrees.clear();lastCapture=Date.now();}};
 }
 export const installDOM = '(' + bootstrap.toString() + ')('+draggable.toString()+','+caretPosition.toString()+','+selectionState.toString()+')';
 export const captureDOM = 'globalThis.__tabShareDOM.capture()';

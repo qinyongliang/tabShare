@@ -83,3 +83,27 @@ func TestCSSOnlyChangesAndRemovalSurviveLateJoin(t *testing.T) {
 		t.Fatal("late join restored deleted CSS")
 	}
 }
+
+func TestPacketLocalStyleReferences(t *testing.T) {
+	style := map[string]any{"color": "red", "width": "100px"}
+	state := &documentState{}
+	d := &Document{Version: "pooled", Sequence: 1, Reset: true, Root: "1", Styles: []map[string]any{style}, Nodes: []map[string]any{{"id": "1", "tag": "body", "styleRef": float64(0)}}}
+	if err := state.apply(d); err != nil {
+		t.Fatal(err)
+	}
+	if state.nodes["1"]["style"].(map[string]any)["color"] != "red" {
+		t.Fatal("style missing")
+	}
+	if _, ok := state.nodes["1"]["styleRef"]; ok {
+		t.Fatal("packet-local reference leaked into cache")
+	}
+	if _, ok := d.Nodes[0]["style"]; ok {
+		t.Fatal("wire packet was mutated")
+	}
+	if err := state.apply(&Document{Version: "pooled", Sequence: 2, Root: "1", Updates: []NodeUpdate{{ID: "1", Changes: map[string]any{"styleRef": float64(0)}}}}); err == nil {
+		t.Fatal("reference from previous packet accepted")
+	}
+	if state.sequence != 1 {
+		t.Fatal("failed packet partially committed")
+	}
+}

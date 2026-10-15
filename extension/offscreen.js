@@ -27,6 +27,10 @@ async function handle(m) {
   if(m.type==='signal')await peers.get(key(m))?.accept(m.signal);
   if(m.type==='peer-left')remove(key(m));
   if(m.type==='send')for(const p of peers.values())if(p.sessionId===m.sessionId&&p.ready&&(!m.viewerId||m.viewerId===p.viewerId))void p.send(m.message);
+  if(m.type==='send-packet'){
+    const bytes=Uint8Array.from(atob(m.data),c=>c.charCodeAt(0));
+    for(const p of peers.values())if(p.sessionId===m.sessionId&&p.ready)void p.bytes(bytes,'state');
+  }
   if(m.type==='asset'){
     const raw=atob(m.data),bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));
     const todo=[...m.viewerIds||[m.viewerId]],delivered=[];

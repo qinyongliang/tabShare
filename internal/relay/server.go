@@ -32,6 +32,7 @@ type Config struct {
 	DOMCacheBytes      int
 }
 type Session struct {
+	ParentID string `json:"parentId,omitempty"`
 	ID       string `json:"id"`
 	Key      string `json:"key"`
 	AgentID  string `json:"agentId"`
@@ -55,6 +56,7 @@ type RasterRegion struct {
 	Cuts        []RasterCut `json:"cuts,omitempty"`
 }
 type Message struct {
+	Popup        *Popup          `json:"popup,omitempty"`
 	Download     *DownloadChunk  `json:"download,omitempty"`
 	Image        *ClipboardImage `json:"image,omitempty"`
 	Region       *RasterRegion   `json:"region,omitempty"`
@@ -85,6 +87,11 @@ type Message struct {
 	Document     *Document       `json:"document,omitempty"`
 	NodeID       string          `json:"nodeId,omitempty"`
 	Full         bool            `json:"full,omitempty"`
+}
+type Popup struct {
+	ID       string `json:"id"`
+	ShareURL string `json:"shareUrl"`
+	Title    string `json:"title"`
 }
 type Input struct {
 	Version           string     `json:"version,omitempty"`
@@ -365,8 +372,25 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	}
 	s.persistMu.Lock()
 	s.mu.Lock()
+	if req.ParentID != "" {
+		parent := s.sessions[req.ParentID]
+		depth := 0
+		for parent != nil && parent.AgentID == req.AgentID {
+			depth++
+			if parent.ParentID == "" {
+				break
+			}
+			parent = s.sessions[parent.ParentID]
+		}
+		if parent == nil || parent.AgentID != req.AgentID || depth > 4 || req.Kind != "tab" {
+			s.mu.Unlock()
+			s.persistMu.Unlock()
+			http.Error(w, "invalid popup parent", 400)
+			return
+		}
+	}
 	for _, old := range s.sessions {
-		if old.AgentID == req.AgentID && old.Kind == req.Kind && ((req.Kind == "url" && old.URL == req.URL) || (req.Kind == "tab" && old.TabID == req.TabID && old.TabEpoch == req.TabEpoch)) {
+		if old.ParentID == req.ParentID && old.AgentID == req.AgentID && old.Kind == req.Kind && ((req.Kind == "url" && old.URL == req.URL) || (req.Kind == "tab" && old.TabID == req.TabID && old.TabEpoch == req.TabEpoch)) {
 			s.mu.Unlock()
 			s.persistMu.Unlock()
 			jsonResponse(w, 200, map[string]any{"session": old, "shareUrl": s.cfg.PublicURL + "/s/" + old.ID + "#" + old.Key})
@@ -414,9 +438,19 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	removed := map[string]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for key, session := range s.sessions {
+			if session.ParentID != "" && removed[session.ParentID] && !removed[key] {
+				removed[key] = true
+				changed = true
+			}
+		}
+	}
 	items := make(map[string]*Session, len(s.sessions))
 	for key, session := range s.sessions {
-		if key != id {
+		if !removed[key] {
 			items[key] = session
 		}
 	}
@@ -428,18 +462,24 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.sessions = items
-	if a := s.agents[se.AgentID]; a != nil {
-		send(a, Message{Type: "pause", SessionID: id})
-	}
 	var viewers []*peer
-	for p := range s.live[id].viewers {
-		viewers = append(viewers, p)
-		delete(s.turnViewers, p.id)
-	}
-	s.clearAssets(s.live[id])
-	s.clearDocument(s.live[id])
-	if len(viewers) == 0 {
-		delete(s.live, id)
+	for child := range removed {
+		if a := s.agents[se.AgentID]; a != nil {
+			send(a, Message{Type: "pause", SessionID: child})
+		}
+		l := s.live[child]
+		if l == nil {
+			continue
+		}
+		for p := range l.viewers {
+			viewers = append(viewers, p)
+			delete(s.turnViewers, p.id)
+		}
+		s.clearAssets(l)
+		s.clearDocument(l)
+		if len(l.viewers) == 0 {
+			delete(s.live, child)
+		}
 	}
 	s.mu.Unlock()
 	s.persistMu.Unlock()
@@ -658,6 +698,13 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch m.Type {
+		case "popup":
+			if m.Popup != nil {
+				child := s.sessions[m.Popup.ID]
+				if child != nil && child.ParentID == se.ID && child.AgentID == id {
+					s.broadcast(se.ID, Message{Type: "popup", Popup: &Popup{ID: child.ID, ShareURL: s.cfg.PublicURL + "/s/" + child.ID + "#" + child.Key, Title: child.Title}})
+				}
+			}
 		case "signal":
 			if validSignal(m.Signal) {
 				for viewer := range s.live[se.ID].viewers {

@@ -18,6 +18,7 @@ type Document struct {
 	Meta       map[string]any   `json:"meta"`
 	CSSChanged bool             `json:"cssChanged,omitempty"`
 	CSS        string           `json:"css,omitempty"`
+	Styles     []map[string]any `json:"styles,omitempty"`
 }
 type NodeUpdate struct {
 	ID      string         `json:"id"`
@@ -43,6 +44,22 @@ func cloneMap(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// References are packet-local; cached/late-join state always keeps normal styles.
+func expandStyle(data map[string]any, styles []map[string]any) (map[string]any, error) {
+	value, ok := data["styleRef"]
+	if !ok {
+		return data, nil
+	}
+	index, ok := value.(float64)
+	if !ok || index < 0 || index >= float64(len(styles)) || index != float64(int(index)) || styles[int(index)] == nil {
+		return nil, errors.New("invalid style reference")
+	}
+	result := cloneMap(data)
+	delete(result, "styleRef")
+	result["style"] = styles[int(index)]
+	return result, nil
 }
 func (state *documentState) apply(d *Document) error {
 	return state.applyBudget(d, 6<<20)
@@ -74,15 +91,23 @@ func (state *documentState) applyBudget(d *Document, budget int) error {
 		if !ok || id == "" || len(id) > 32 {
 			return errors.New("invalid node identity")
 		}
-		next[id] = cloneMap(n)
+		node, err := expandStyle(n, d.Styles)
+		if err != nil {
+			return err
+		}
+		next[id] = cloneMap(node)
 	}
 	for _, update := range d.Updates {
+		changes, err := expandStyle(update.Changes, d.Styles)
+		if err != nil {
+			return err
+		}
 		old := lookup(update.ID)
 		if old == nil {
 			return errors.New("update refers to missing node")
 		}
 		node := cloneMap(old)
-		for field, value := range update.Changes {
+		for field, value := range changes {
 			if field == "id" {
 				return errors.New("immutable node identity")
 			}

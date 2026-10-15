@@ -8,7 +8,7 @@ async function streamBytes(stream,limit){
   const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return bytes;
 }
 export async function compressPacket(bytes){
-  if(bytes.length<8192||bytes[0]!==1||typeof CompressionStream!=='function')return bytes;
+  if(bytes.length<2048||bytes[0]!==1||typeof CompressionStream!=='function')return bytes;
   let gzip;try{gzip=await streamBytes(new Blob([bytes.subarray(1)]).stream().pipeThrough(new CompressionStream('gzip')),LIMIT);}catch{return bytes;}
   if(gzip.length+5>=bytes.length*.9)return bytes;
   const packet=new Uint8Array(gzip.length+5);packet[0]=3;new DataView(packet.buffer).setUint32(1,bytes.length-1);packet.set(gzip,5);return packet;
@@ -105,6 +105,7 @@ export class PeerLink {
     const retained=bytes.length,id=++this.serial;
     const job=entry.tail.then(async()=>{
       if(this.closed)return false;
+      if(name==='state'&&bytes[0]===3&&bytes.length>=5){this.stats.compressed++;this.stats.saved+=Math.max(0,new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).getUint32(1)+1-bytes.length);}
       if(name==='state'&&bytes[0]===1){const packed=await compressPacket(bytes);if(packed!==bytes){this.stats.compressed++;this.stats.saved+=bytes.length-packed.length;bytes=packed;}}
       for(let offset=0;offset<bytes.length;offset+=CHUNK){
         if(!await this.drained(entry)||this.closed)return false;

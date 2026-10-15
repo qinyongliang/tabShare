@@ -8,7 +8,8 @@ export class Mirror {
     if (!delta.reset && delta.version !== this.version) return false;
     if (delta.reset) { this.nodes.clear();this.parents.clear();this.states.clear();this.localValues.clear();this.resourceUsers.clear();this.nodeResources.clear();this.topLayers.clear(); this.doc.body.replaceChildren();for(const a of [...this.doc.body.attributes])this.doc.body.removeAttribute(a.name); this.version = delta.version; this.doc.head.querySelectorAll('style').forEach(n => n.remove()); }
     if(delta.reset||delta.cssChanged||delta.css!=null){this.css=delta.css||'';this.stylesheet();}
-    const added = delta.nodes || [];
+    const expand=data=>{if(data.styleRef===undefined)return data;const {styleRef,...value}=data;if(!Number.isInteger(styleRef)||!delta.styles?.[styleRef])throw Error('Invalid style reference');return {...value,style:delta.styles[styleRef]};};
+    const added = (delta.nodes||[]).map(expand),updates=(delta.updates||[]).map(u=>({...u,changes:expand(u.changes)}));
     for (const data of added) {
       if (this.nodes.has(data.id)) continue;
       const node = data.id === delta.root ? this.doc.body : data.tag === '#text' ? this.doc.createTextNode('') : data.ns==='svg'&&svgTags.has(data.tag)?this.doc.createElementNS('http://www.w3.org/2000/svg',data.tag):this.doc.createElement(tags.has(data.tag) ? data.tag : 'div');
@@ -16,15 +17,16 @@ export class Mirror {
       this.nodes.set(data.id, node);
     }
     for (const data of added) this.properties(this.nodes.get(data.id), data);
-    for (const {id, changes} of delta.updates || []) { const node = this.nodes.get(id); if (node) this.properties(node, changes); }
+    for (const {id, changes} of updates) { const node = this.nodes.get(id); if (node) this.properties(node, changes); }
     const reconcile=new Set();
-    for(const data of [...added,...(delta.updates||[]).map(u=>({id:u.id,...u.changes}))]){
+    for(const data of added){
       if(data.children)reconcile.add(data.id);
       if(this.parents.has(data.id))reconcile.add(this.parents.get(data.id));
     }
+    for(const {id,changes} of updates)if(changes.children)reconcile.add(id);
     for(const id of reconcile)this.children(this.nodes.get(id),this.states.get(id)?.children||[]);
     for (const id of delta.removes || []) { const node=this.nodes.get(id);if(node!==this.doc.body)node?.remove();this.nodes.delete(id);this.states.delete(id);this.parents.delete(id);this.localValues.delete(id);this.indexResources(id,null);this.topLayers.delete(id);this.doc.getElementById("ts-pseudo-"+id)?.remove(); }
-    for (const data of [...added, ...(delta.updates || []).map(x => ({id: x.id, ...x.changes}))]) {
+    for (const data of [...added, ...updates.map(x => ({id: x.id, ...x.changes}))]) {
       const node = this.nodes.get(data.id);
       if (node?.nodeType === 1) {
         if (typeof data.scrollTop === 'number' && Math.abs(node.scrollTop - data.scrollTop) > 2) node.scrollTop = data.scrollTop;
@@ -33,6 +35,7 @@ export class Mirror {
     }
     for(const id of this.topLayers){const state=this.states.get(id);const n=this.nodes.get(id);if(n?.isConnected&&n.nodeType===1){if(n.tagName==='DIALOG'&&typeof state.modal==='boolean'){if(state.modal&&!n.matches(':modal')){n.removeAttribute('open');try{n.showModal();}catch{}}else if(!state.modal&&n.matches(':modal'))n.close();}if(typeof state.popoverOpen==='boolean')try{if(state.popoverOpen&&!n.matches(':popover-open'))n.showPopover();else if(!state.popoverOpen&&n.matches(':popover-open'))n.hidePopover();}catch{}}}
     this.meta = delta.meta;this.sequence=delta.sequence;
+    if(typeof delta.meta?.title==='string')this.doc.title=delta.meta.title;
     return true;
   }
   properties(node, data,remember=true) {

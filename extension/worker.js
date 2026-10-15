@@ -3,6 +3,7 @@ import {DocumentState} from './document-state.js';
 import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame, validPeerInput} from './controller.js';
 import {installDOM, captureDOM} from './dom-capture.js';
 import {ResourceBridge} from './resources.js';
+import {compressPacket} from './peer.js';
 
 let config, socket, connecting, retryTimer;
 function downloadClickHook(){const key=Symbol.for('tabshare.downloadHook');if(globalThis[key])return;const original=HTMLAnchorElement.prototype.click;function click(...args){if(this.hasAttribute('download')&&this.href.startsWith('blob:')&&!document.dispatchEvent(new CustomEvent('tabshare-download',{cancelable:true,detail:JSON.stringify({url:this.href,suggestedFilename:this.download})})))return;return original.apply(this,args);}globalThis[key]={original,click};HTMLAnchorElement.prototype.click=click;}
@@ -77,10 +78,21 @@ function peerInput(m) {
   const input={...m.message.input,viewerId:m.viewerId};
   void enqueueInput({sessionId:m.sessionId,input});
 }
+// Wake on real page changes. An earlier deadline is never postponed by a stream
+// of events, and interactive changes still pay the same sustained byte budget.
+function requestSnapshot(tabId,urgent=false){
+  const t=targets.get(tabId);if(!t)return;
+  t.wakePending=true;t.wakeUrgent||=urgent;
+  if(t.capturing||t.syncing)return;
+  const now=Date.now(),due=Math.max(now+4,(t.lastSent||0)+(t.wakeUrgent?16:200),t.byteDelayUntil||0);
+  if(t.wakeTimer&&t.wakeAt<=due)return;
+  clearTimeout(t.wakeTimer);t.wakeAt=due;t.nextSend=Math.min(t.nextSend||due,due);
+  t.wakeTimer=setTimeout(()=>{t.wakeTimer=null;void snapshot(tabId);},Math.max(0,due-now));
+}
 function enqueueInput(message){
   const binding=bindings.get(message.sessionId),target=binding&&targets.get(binding.tabId);if(!target)return;
   const member=peers.has(message.sessionId+':'+message.input.viewerId);
-  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);if(['mouseReleased','text','keyDown','scroll'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;target.nextSend=Math.max(Date.now()+25,target.byteDelayUntil||0);clearTimeout(target.inputSnapshot);target.inputSnapshot=setTimeout(()=>void snapshot(binding.tabId),Math.max(30,target.nextSend-Date.now()+5));}return result;}catch(error){if(contextChanged(error)){target.pending=null;target.nextSend=0;return;}if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
+  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);if(['mouseMoved','mouseLeave','mouseReleased','text','keyDown','scroll','select'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;requestSnapshot(binding.tabId,true);}return result;}catch(error){if(contextChanged(error)){target.pending=null;target.nextSend=0;return;}if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
   if(message.input.action==='dialog')return run();
   target.inputs??=new InputQueue();
   const key=message.input.action==='mouseMoved'?'move:'+message.input.viewerId:null;
@@ -98,7 +110,7 @@ async function peerSnapshot(sessionId,viewerId) {
   try{while(t.capturing)await new Promise(resolve=>setTimeout(resolve,10));const document=t.document?.snapshot();
     if(document){if(p.direct)await offscreen({type:'send',sessionId,viewerId,message:{type:'dom',document}});else transmit({type:'dom',sessionId,document});}
     else {t.syncing=false;await resync(sessionId);}
-  }finally{t.syncing=false;}
+  }finally{t.syncing=false;if(t.wakePending)requestSnapshot(b.tabId,t.wakeUrgent);}
 }
 async function backgroundVideo(tabId) {
   const t=targets.get(tabId);if(!t?.streaming||nativeTabs.has(tabId)||t.frameBusy||Date.now()<(t.nextVideo||0)||!t.needsFrame&&Date.now()-(t.lastFrame||0)<100)return;
@@ -131,7 +143,7 @@ async function videoState(tabId,active) {
 }
 let clipboardJobs=Promise.resolve();
 let operationChain = Promise.resolve();
-function schedule(task) { operationChain = operationChain.then(task).catch(error => console.warn('TabShare operation failed:',error.message)); }
+function schedule(task) { operationChain = operationChain.then(task).catch(error => {if(!contextChanged(error))console.warn('TabShare operation failed:',error.message);}); }
 const boot = (async () => {
   let {epoch} = await chrome.storage.session.get('epoch');
   if (!epoch) { epoch = crypto.randomUUID(); await chrome.storage.session.set({epoch}); }
@@ -230,7 +242,7 @@ async function connect() {
   })().finally(() => { connecting = null; });
   return connecting;
 }
-function contextChanged(error){return /Cannot find context|Execution context was destroyed|Inspected target navigated|No frame with given id|Frame with the given id|共享页面正在切换/i.test(error?.message||'');}
+function contextChanged(error){return /Cannot find context|Execution context was destroyed|Inspected target navigated|Session with given id not found|No session with given id|No frame with given id|Frame with the given id|共享页面正在切换/i.test(error?.message||'');}
 async function command(tabId, method, params = {}) { return chrome.debugger.sendCommand({tabId}, method, params); }
 async function world(tabId) {
   const target = targets.get(tabId);
@@ -245,6 +257,7 @@ async function world(tabId) {
   valid();
   target.contextId = result.executionContextId;
   const contextId=target.contextId;
+  try{await command(tabId,'Runtime.addBinding',{name:'__tabShareWake',executionContextId:contextId});target.wakeEnabled=true;}catch{target.wakeEnabled=false;}
   await evaluate(tabId, installDOM,contextId);
   await command(tabId,'Runtime.evaluate',{expression:'('+downloadClickHook.toString()+')()',returnByValue:true}).catch(()=>{});
   await evaluate(tabId, 'globalThis.__tabShareDOM.reset()',contextId);
@@ -259,7 +272,7 @@ async function world(tabId) {
   })().catch(error=>{if((target.contextEpoch||0)===epoch){target.contextId=null;target.resources?.dispose();target.resources=null;}throw error;}).finally(()=>{if(target.worldTask===task)target.worldTask=null;});
   target.worldTask=task;return task;
 }
-function invalidateWorld(target){target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;target.navigation=null;target.historyURL=null;target.documentReady=false;}
+function invalidateWorld(target){clearTimeout(target.wakeTimer);target.wakeTimer=null;target.wakePending=false;target.wakeUrgent=false;target.wakeEnabled=false;target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;target.navigation=null;target.historyURL=null;target.documentReady=false;}
 async function evaluate(tabId, expression,expectedContext) {
   const target = targets.get(tabId);
   const contextId=expectedContext??target?.contextId;
@@ -297,6 +310,7 @@ async function rememberMode(target,mode){
 async function snapshot(tabId) {
   const target = targets.get(tabId);
   if (!target || target.capturing || target.syncing || Date.now() < target.nextSend || socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 512000) return;
+  clearTimeout(target.wakeTimer);target.wakeTimer=null;target.wakePending=false;target.wakeUrgent=false;target.lastPoll=Date.now();
   target.capturing = true;
   let contextId,capturingDOM=false;
   try {
@@ -318,17 +332,26 @@ async function snapshot(tabId) {
     const requests=delta.resources;delete delta.resources;const downloads=delta.downloads;delete delta.downloads;if(downloads?.length)for(const request of downloads)void downloadBlob(tabId,request);
     if(!target.pending){target.document.apply(delta);target.documentReady=true;}
     if(requests?.length)void target.resources.transfer(requests,target.sessions,resourceConfig());
+    const json=new TextEncoder().encode(JSON.stringify({type:'dom',document:delta})),raw=new Uint8Array(json.length+1);raw[0]=1;raw.set(json,1);
+    const packed=await compressPacket(raw);
+    let encoded;
+    if(typeof btoa==='function'){let binary='';for(let i=0;i<packed.length;i+=4096)binary+=String.fromCharCode(...packed.subarray(i,i+4096));encoded=btoa(binary);}
     let sent = true;
-    for (const id of target.sessions) sent = publish({type:'dom', sessionId:id, document:delta}) && sent;
+    for(const id of target.sessions){
+      if(!encoded){sent=publish({type:'dom',sessionId:id,document:delta})&&sent;continue;}
+      const members=roomPeers(id);if(members.some(p=>p.direct))void offscreen({type:'send-packet',sessionId:id,data:encoded}).catch(()=>{});
+      if(!members.length||members.some(p=>!p.direct))sent=transmit({type:'dom',sessionId:id,document:delta})&&sent;
+    }
     if (!sent) { target.pending = delta; return; }
     target.pending = null;
     const wasBuilding=delta.reset||target.building;
     const building=wasBuilding&&delta.meta?.pending;target.building=building;
     // Coalesce mutations while paying down a byte budget. Initial state is sent only once.
-    const bytes = new TextEncoder().encode(JSON.stringify(delta)).byteLength;
-    target.byteDelayUntil=Date.now()+bytes/131072*1000;
-    target.nextSend = Date.now() + (wasBuilding?(building?50:200):Math.max(target.videoFPS===2?1000:200,bytes/131072*1000));
-    if(building){clearTimeout(target.progressTimer);target.progressTimer=setTimeout(()=>void snapshot(tabId),55);}
+    const bytes=packed.length,now=Date.now();
+    target.byteCredit=Math.min(32768,(target.byteCredit??32768)+(now-(target.budgetAt||now))*131072/1000)-bytes;
+    target.budgetAt=target.lastSent=now;target.byteDelayUntil=now+Math.max(0,-target.byteCredit)/131072*1000;
+    target.nextSend=Math.max(now+16,target.byteDelayUntil);
+    if(delta.meta?.pending){clearTimeout(target.progressTimer);target.progressTimer=setTimeout(()=>void snapshot(tabId),Math.max(16,target.nextSend-Date.now()+1));}
   } catch (error) {
     if(contextChanged(error)){if(target.contextId===contextId)invalidateWorld(target);target.pending=null;target.nextSend=0;return;}
     if(capturingDOM&&contextId===target.contextId&&/Execution was terminated|timed out/i.test(error.message)){
@@ -336,7 +359,7 @@ async function snapshot(tabId) {
     }
     if(contextId===target.contextId)invalidateWorld(target);
     if (targets.has(tabId)) for (const id of target.sessions) status(id,'error',error.message);
-  } finally { target.capturing = false; }
+  } finally { target.capturing = false;if(targets.get(tabId)===target&&target.wakePending)requestSnapshot(tabId,target.wakeUrgent); }
 }
 async function raster(tabId) {
   const target=targets.get(tabId);
@@ -392,7 +415,7 @@ async function targetFor(tab,mode='dom') {
   target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
   try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});await command(tab.id,'Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Response'}]});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
-  target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
+  target.timer=setInterval(()=>{if(!target.wakeEnabled||Date.now()-(target.lastPoll||0)>=1000)void snapshot(tab.id);},200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
 }
 async function switchTab(id,tab,binding) {
   const viewport=targets.get(binding.tabId)?.viewport;
@@ -416,7 +439,7 @@ async function openSession(session) {
       const target=await targetFor(tab,stored.sessionModes?.[session.id]||'dom');
       const alreadyRunning=target.sessions.size>0;
       target.sessions.add(session.id);
-      bindings.set(session.id, {tabId: tab.id,rootTabId:tab.id,popups:[], session});
+      const parent=bindings.get(session.parentId);bindings.set(session.id,{tabId:tab.id,rootTabId:parent?.rootTabId||tab.id,popups:[],depth:parent?(parent.depth||0)+1:0,session});
       if(roomPeers(session.id).length)await offscreen({type:'bind',sessionId:session.id,tabId:tab.id}).catch(()=>{});
       const sessionTabs = stored.sessionTabs || {};
       sessionTabs[session.id] = {tabId: tab.id, epoch};
@@ -437,7 +460,7 @@ async function pause(sessionId) {
   if (!target) return;
   target.sessions.delete(sessionId);
   if (target.sessions.size) return;
-  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.inputSnapshot);clearTimeout(target.styleRefresh);
+  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.wakeTimer);clearTimeout(target.styleRefresh);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   await videoState(binding.tabId,false);nativeTabs.delete(binding.tabId);await offscreen({type:'stop-video',tabId:binding.tabId}).catch(()=>{});
   target.resources?.dispose();
@@ -470,7 +493,7 @@ async function control(message) {
   }
   if(action==='viewport'){await resizeViewport(binding.tabId,{width:input.width,height:input.height,deviceScaleFactor:input.deviceScaleFactor,owner:input.viewerId});return;}
   if(action==='restoreViewport'||action==='viewportRelease'){if(action==='viewportRelease'&&target.viewport?.owner!==input.viewerId)return;await resizeViewport(binding.tabId,null);return;}
-  if(action==='closePopup'){if(binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
+  if(action==='closePopup'){if(binding.session.parentId||binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
   if(action==='dialog'){if(target?.dialog?.id!==input.dialogId)return;await command(binding.tabId,'Page.handleJavaScriptDialog',{accept:!!input.accept,promptText:input.text||''});return;}
   if(action==='mode'){if(input.mode!=='dom')return;await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
   if (input.nodeId) {
@@ -491,6 +514,10 @@ async function control(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
   if(!target)return;
+  if(method==='Runtime.bindingCalled'&&params.name==='__tabShareWake'){
+    if(params.executionContextId!==target.contextId||typeof params.payload!=='string'||params.payload.length>200)return;
+    try{const signal=JSON.parse(params.payload);if(signal.version===target.document.version||!target.documentReady)requestSnapshot(source.tabId,signal.urgent===true);}catch{}return;
+  }
   if(method==='Network.requestWillBeSent'&&params.type==='Document'){const actor=downloadActor(source.tabId);if(actor){target.downloadActors||=new Map();if(!target.downloadActors.has(params.requestId)){if(target.downloadActors.size>=32)target.downloadActors.delete(target.downloadActors.keys().next().value);target.downloadActors.set(params.requestId,{...actor,hint:target.downloadHint?.url===params.request.url?target.downloadHint:null});}}}
   if(method==='Network.loadingFinished'||method==='Network.loadingFailed')target.downloadActors?.delete(params.requestId);
   if(method==='Fetch.requestPaused'){void downloadResponse(source.tabId,params);return;}
@@ -515,7 +542,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 function detached(tabId, reason) {
   const target = targets.get(tabId);
   if (!target) return;
-  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.inputSnapshot);clearTimeout(target.styleRefresh);
+  target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.wakeTimer);clearTimeout(target.styleRefresh);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   target.resources?.dispose();nativeTabs.delete(tabId);void offscreen({type:'stop-video',tabId}).catch(()=>{});targets.delete(tabId);
   for (const id of target.sessions) {
@@ -527,10 +554,31 @@ function detached(tabId, reason) {
 }
 chrome.debugger.onDetach.addListener((source, reason) => detached(source.tabId, reason));
 chrome.tabs.onRemoved.addListener(tabId => {detached(tabId,'target_closed');for(const [id,binding] of bindings)if(binding.rootTabId===tabId&&binding.tabId!==tabId)schedule(async()=>{await pause(id);status(id,'closed','原共享标签页已关闭');});});
-chrome.tabs.onCreated.addListener(tab=>{if(!tab.openerTabId)return;for(const [id,binding] of bindings)if(binding.tabId===tab.openerTabId&&binding.popups.length<4)schedule(async()=>{if(bindings.get(id)!==binding)return;try{status(id,'connecting','正在连接共享网页打开的弹出页');const fresh=await chrome.tabs.get(tab.id);await switchTab(id,fresh,{...binding,popups:[...binding.popups,binding.tabId]});}catch(error){status(id,'error',error.message);}});});
+const popupTasks=new Map();
+let popupWrites=Promise.resolve();
+function popupRegistry(update){const run=async()=>{const {popupSessions={}}=await chrome.storage.local.get('popupSessions');await update(popupSessions);await chrome.storage.local.set({popupSessions});};const job=popupWrites.then(run,run);popupWrites=job.catch(()=>{});return job;}
+function openedTab(parentTabId,tabId){
+  for(const [id,binding] of bindings){
+    if(binding.tabId!==parentTabId||(binding.depth||0)>=4)continue;
+    const key=id+':'+tabId;if(popupTasks.has(key))continue;
+    if([...popupTasks.keys()].filter(k=>k.startsWith(id+':')).length>=32){publish({type:'notice',sessionId:id,detail:'此共享页同时打开的新页面已达 32 个，请先关闭部分页面。'});continue;}
+    const task=(async()=>{
+      const tab=await chrome.tabs.get(tabId);if(bindings.get(id)!==binding)return;
+      const epoch=await boot;
+      const result=await api('/api/sessions',{method:'POST',body:JSON.stringify({agentId:config.agentId,parentId:id,kind:'tab',tabId,tabEpoch:epoch,url:/^https?:/.test(tab.url||'')?tab.url:binding.session.url,title:tab.title||'新页面'})});
+      await popupRegistry(registry=>{registry[result.session.id]={tabId,parentId:id};});
+      if(bindings.get(id)===binding)publish({type:'popup',sessionId:id,popup:{id:result.session.id,shareUrl:result.shareUrl,title:result.session.title}});
+    })().catch(error=>{popupTasks.delete(key);if(bindings.get(id)===binding)publish({type:'notice',sessionId:id,detail:'新页面共享失败：'+error.message});});
+    popupTasks.set(key,task);
+  }
+}
+chrome.tabs.onCreated.addListener(tab=>{if(tab.openerTabId)openedTab(tab.openerTabId,tab.id);});
+chrome.webNavigation?.onCreatedNavigationTarget.addListener(details=>openedTab(details.sourceTabId,details.tabId));
+chrome.tabs.onRemoved.addListener(tabId=>{schedule(async()=>{await popupRegistry(async registry=>{for(const [id,popup] of Object.entries(registry))if(popup.tabId===tabId){await api('/api/sessions/'+encodeURIComponent(id),{method:'DELETE'}).catch(()=>{});delete registry[id];}});for(const key of popupTasks.keys())if(key.endsWith(':'+tabId))popupTasks.delete(key);});});
+
 chrome.tabs.onUpdated.addListener((tabId, changes, tab) => {
   const target = targets.get(tabId);
-  if (target && (changes.url || changes.title)) for (const id of target.sessions) status(id, 'connected', '', tab);
+  if(target&&('url' in changes||'title' in changes)){for(const id of target.sessions)status(id,'connected','',tab);requestSnapshot(tabId,true);}
 });
 
 async function api(path, options = {}) {

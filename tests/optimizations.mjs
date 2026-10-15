@@ -31,7 +31,8 @@ try{
  await source.evaluate(installDOM);const cdp=await source.context().newCDPSession(source);
  const bridge=new ResourceBridge((m,p)=>cdp.send(m,p),expression=>source.evaluate(expression));await bridge.scan();
  const chunks=[];let chunk;do{chunk=await source.evaluate(()=>__tabShareDOM.capture());if(chunk)chunks.push(chunk);}while(chunk?.meta.pending);
- const initial={...chunks[0],nodes:chunks.flatMap(c=>c.nodes),resources:chunks.flatMap(c=>c.resources||[]),meta:chunks.at(-1).meta};
+ const initialState=new DocumentState();for(const c of chunks)initialState.apply(c);
+ const initial={...initialState.snapshot(),resources:chunks.flatMap(c=>c.resources||[])};
  assert.equal(initial.meta.truncated,false);
  assert.ok(initial.resources.some(r=>r.url.endsWith('/font.ttf')),'used, loaded font is forwarded');
  assert.ok(initial.resources.every(r=>!r.url.includes('unused-')),'unused faces and alternative sources are not requested');
@@ -130,6 +131,13 @@ try{
  assert.equal(incremental.nodes,4031);assert.ok(incremental.text.includes('node 3999'));
  console.log('PASS: large nested DOM streams in bounded incremental batches; late children attach; DOM stays active');
 
+ const bulk=await browser.newPage();await bulk.goto('http://127.0.0.1:'+server.address().port);
+ const bulkResult=await bulk.evaluate(async install=>{document.body.replaceChildren();for(let i=0;i<1200;i++){const n=document.createElement('div');n.style.cssText='padding:4px;border:1px solid #888;background:rgb(240,245,250);font:16px system-ui;color:rgb(30,50,70)';n.textContent='Row '+i;document.body.append(n);}(0,eval)(install);let d,raw=0,packed=0,batches=0;const start=performance.now();do{d=__tabShareDOM.capture();if(!d)break;batches++;packed+=JSON.stringify(d).length;const expand=v=>{if(v.styleRef===undefined)return v;const {styleRef,...rest}=v;return {...rest,style:d.styles[styleRef]};};raw+=JSON.stringify({...d,styles:undefined,nodes:d.nodes.map(expand),updates:d.updates.map(u=>({...u,changes:expand(u.changes)}))}).length;}while(d.meta.pending);return {raw,packed,batches,ms:performance.now()-start,idle:__tabShareDOM.capture()};},installDOM);
+ assert.ok(bulkResult.packed<bulkResult.raw*.55,'repeated styles must substantially reduce raw DOM payload');assert.equal(bulkResult.idle,null,'packing must not mutate retained diff state');console.log('PASS: 1200-row style pooling:',bulkResult.raw,'→',bulkResult.packed,'JSON bytes,',bulkResult.batches,'batches,',bulkResult.ms.toFixed(0),'ms capture');
+ const prioritized=await bulk.evaluate(async()=>{const input=document.createElement('input');input.id='priority-input';document.body.append(input);input.focus({preventScroll:true});await Promise.resolve();let d,registered=false;do{d=__tabShareDOM.capture();registered ||= !!d?.nodes.some(n=>n.attrs?.id==='priority-input');}while(d?.meta.pending);document.body.style.padding='12px';input.value='Immediate feedback';input.dispatchEvent(new InputEvent('input',{bubbles:true,data:'Immediate feedback'}));await Promise.resolve();const next=__tabShareDOM.capture();return {registered,firstValue:next.updates[0]?.changes.value,pending:next.meta.pending};});
+ if(prioritized.firstValue!=='Immediate feedback')console.log('Priority diagnostic:',prioritized);
+ assert.equal(prioritized.registered,true);assert.equal(prioritized.firstValue,'Immediate feedback','input feedback must precede a large dirty subtree');assert.equal(prioritized.pending,true);await bulk.close();
+
  const caret=await source.evaluate(()=>{const input=document.createElement('input');input.style.cssText='position:fixed;left:120px;top:80px;width:300px;height:40px;padding:4px;border:1px solid;font:20px monospace';input.value='abcdef';document.body.append(input);input.focus();input.setSelectionRange(0,0);const a=__tabShareDOM.capture().meta.caret;input.setSelectionRange(3,3);const b=__tabShareDOM.capture().meta.caret;const c=document.createElement('canvas').getContext('2d');c.font=getComputedStyle(input).font;const advance=c.measureText('abc').width;input.setSelectionRange(1,4);const selection=__tabShareDOM.capture().meta.selection;return {a,b,advance,selection};});
  assert.ok(Math.abs(caret.b.x-caret.a.x-caret.advance)<1,'input caret tracks the insertion position');assert.ok(caret.b.y>=80&&caret.b.y<120);assert.equal(caret.selection.text,'bcd');
  await visitor.evaluate((await readFile(new URL('../web/remote-input.js',import.meta.url),'utf8')).replace('export class RemoteInput','globalThis.ReviewRemoteInput=class RemoteInput'));
@@ -151,6 +159,8 @@ try{
  assert.ok(firstInput.every(d=>!d.reset),'placeholder updates use differences');
  const typingCost=await placeholderSource.evaluate(()=>{const original=globalThis.getComputedStyle;let unrelated=0;globalThis.getComputedStyle=(node,...args)=>{if(document.querySelector('#unrelated').contains(node))unrelated++;return original(node,...args);};const node=document.querySelector('#plain');node.value='ab';node.dispatchEvent(new InputEvent('input',{bubbles:true,data:'b'}));const d=__tabShareDOM.capture();globalThis.getComputedStyle=original;return {unrelated,updated:d?.updates?.length||0,nodes:d?.nodes?.length||0,reset:d?.reset};});
  assert.equal(typingCost.unrelated,0,'ordinary typing must not rescan unrelated computed styles');assert.equal(typingCost.nodes,0);assert.equal(typingCost.updated,1);assert.equal(typingCost.reset,false);
+ const cssScanCost=await placeholderSource.evaluate(()=>{const descriptor=Object.getOwnPropertyDescriptor(CSSStyleSheet.prototype,'cssRules');let scans=0;Object.defineProperty(CSSStyleSheet.prototype,'cssRules',{...descriptor,get(){scans++;return descriptor.get.call(this);}});try{const n=document.querySelector('#plain');n.value='abc';n.dispatchEvent(new InputEvent('input',{bubbles:true,data:'c'}));__tabShareDOM.capture();return scans;}finally{Object.defineProperty(CSSStyleSheet.prototype,'cssRules',descriptor);}});
+ assert.equal(cssScanCost,0,'typing must reuse unchanged stylesheet indexes');
  await placeholderSource.locator('#plain').fill('');await syncPlaceholders();assert.equal(await placeholderMirror.locator('#hint').evaluate(n=>getComputedStyle(n).opacity),'1','clearing restores the placeholder');
  await placeholderSource.locator('#rich').fill('hello');await syncPlaceholders();assert.equal(await placeholderMirror.locator('#rich-field').evaluate(n=>getComputedStyle(n,'::before').content),'none','typing removes an ancestor pseudo-element placeholder');
  await placeholderSource.locator('#rich').evaluate(n=>{n.replaceChildren();n.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward'}));});await syncPlaceholders();assert.equal(await placeholderMirror.locator('#rich-field').evaluate(n=>getComputedStyle(n,'::before').content),'"请输入内容"','clearing restores the pseudo-element placeholder');
@@ -167,8 +177,17 @@ try{
    pointer.dispose();move(200,200);frame.remove();return {tail,descendantLeave,end,count,disposed:sent.length===count};
  });
  assert.equal(pointerResult.tail.x,140);assert.equal(pointerResult.tail.y,100);assert.ok(!pointerResult.tail.nodeId,'movement uses viewport coordinates');assert.equal(pointerResult.descendantLeave,'mouseMoved');assert.equal(pointerResult.end.action,'mouseLeave');assert.ok(pointerResult.count<=4);assert.equal(pointerResult.disposed,true);
+ for(const title of ['Dynamic title 标题','', 'Restored title']){
+   await placeholderSource.evaluate(title=>{document.title=title;},title);const batches=await syncPlaceholders();assert.equal(await placeholderMirror.title(),title,'mirror title follows updates and clearing');assert.equal(batches.at(-1).meta.title,title);assert.ok(batches.every(d=>!d.reset&&!d.nodes.length&&!d.updates.length),'title-only changes never recapture the body');
+ }
+ const wakes=await placeholderSource.evaluate(async()=>{const signals=[];globalThis.__tabShareWake=signal=>signals.push(JSON.parse(signal));const timer=globalThis.setTimeout;globalThis.setTimeout=()=>{throw Error('Wake must not depend on a throttled page timer');};try{const node=document.querySelector('#unrelated');node.textContent='One';node.textContent='Two';await Promise.resolve();await Promise.resolve();return signals;}finally{globalThis.setTimeout=timer;delete globalThis.__tabShareWake;}});
+ assert.equal(wakes.length,1,'synchronous mutations share one wakeup');assert.equal(wakes[0].urgent,true);
+ await placeholderMirror.evaluate((await readFile(new URL('../web/popups.js',import.meta.url),'utf8')).replace('export class PopupWindows','globalThis.ReviewPopupWindows=class PopupWindows'));
+ const blockedPopup=await placeholderMirror.evaluate(()=>{const settings=document.createElement('aside');settings.id='share-settings';settings.hidden=true;const list=document.createElement('div');list.id='shared-pages';settings.append(list);document.body.append(settings);const popups=new ReviewPopupWindows(document,()=>null),id='a'.repeat(43),key='b'.repeat(43),popup={id,shareUrl:location.origin+'/s/'+id+'#'+key,title:'Child page'};popups.receive(popup);popups.receive(popup);popups.receive({id:'c'.repeat(43),shareUrl:'https://example.com/s/'+id+'#'+key});return {links:list.querySelectorAll('a').length,visible:!settings.hidden,url:list.querySelector('a').href};});
+ assert.equal(blockedPopup.links,1);assert.equal(blockedPopup.visible,true);assert.ok(blockedPopup.url.includes('?popup=1#'),'blocked popups retain a native link without duplicates');
  await placeholderSource.close();await placeholderMirror.close();
  console.log('PASS: placeholders hide/restore, focus and sibling hover styles synchronize; ordinary typing updates one control without scanning 1000 unrelated elements');
  console.log('PASS: viewport pointer positions preserve the trailing move; leaving cancels pending moves and resets source hover');
+ console.log('PASS: title updates and clearing carry metadata only; ordinary typing performs zero stylesheet scans');
 
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

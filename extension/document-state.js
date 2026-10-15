@@ -3,8 +3,9 @@ export class DocumentState {
   constructor(){this.nodes=new Map();}
   apply(d){
     if(d.reset)this.nodes.clear();
-    for(const node of d.nodes||[])this.nodes.set(node.id,node);
-    for(const u of d.updates||[]){const old=this.nodes.get(u.id);if(!old)continue;const node={...old};
+    const expand=data=>{if(data.styleRef===undefined)return data;const {styleRef,...value}=data;if(!Number.isInteger(styleRef)||!d.styles?.[styleRef])throw Error('Invalid style reference');return {...value,style:d.styles[styleRef]};};
+    for(const raw of d.nodes||[]){const node=expand(raw);this.nodes.set(node.id,node);}
+    for(const raw of d.updates||[]){const u={...raw,changes:expand(raw.changes)},old=this.nodes.get(u.id);if(!old)continue;const node={...old};
       for(const [field,value] of Object.entries(u.changes)){if(field==='style'||field==='attrs'){const merged={...old[field]};for(const [k,v] of Object.entries(value))if(v===null)delete merged[k];else merged[k]=v;node[field]=merged;}else node[field]=value;}
       this.nodes.set(u.id,node);
     }

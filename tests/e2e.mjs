@@ -1,5 +1,6 @@
 import {InputQueue} from '../extension/input-queue.js';
 import {DocumentState} from '../extension/document-state.js';
+import {compressPacket,decodeJSONPacket} from '../extension/peer.js';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {mkdtemp, readFile, rm, mkdir} from 'node:fs/promises';
@@ -85,10 +86,10 @@ try {
     if(req.url==='/compat'){
       res.setHeader('Content-Type','text/html; charset=utf-8');res.end(`<!doctype html><html><head><title>Compatibility</title><link rel="stylesheet" href="${assetOrigin}/styles.css"><style>body{font:18px sans-serif;margin:20px}#badge::before{content:'★';color:rgb(15,140,80);margin-right:8px}#rich{border:1px solid #888;padding:12px;width:450px}dialog::backdrop{background:rgba(20,40,80,.4)}</style></head><body>
       <div id="badge">Shared font and pseudo</div><img id="remote-image" src="${assetOrigin}/image.svg"><div id="background" style="width:80px;height:40px;background-image:url('${assetOrigin}/image.svg')"></div>
-      <div id="shadow-host"></div><div id="rich" contenteditable="true"><strong>alpha</strong><em>bravo</em></div><button id="js-prompt">Prompt</button><button id="open-popup">Popup</button><button id="show-dialog">Modal</button><button id="show-popover">Popover</button>
+      <div id="shadow-host"></div><div id="rich" contenteditable="true"><strong>alpha</strong><em>bravo</em></div><button id="js-prompt">Prompt</button><button id="open-popup">Popup</button><a id="blank-popup" href="/popup" target="_blank" rel="noopener">Blank link</a><button id="delayed-popup">Delayed popup</button><button id="show-dialog">Modal</button><button id="show-popover">Popover</button>
       <dialog id="native-dialog"><p>Native dialog</p><button id="close-dialog">Close modal</button></dialog><div id="native-popover" popover>Native popover</div>
       <script>const post=data=>fetch('/event',{method:'POST',body:JSON.stringify(data)});const host=document.querySelector('#shadow-host');const closed=host.attachShadow({mode:'closed'});closed.innerHTML='<style>button{color:rgb(10,90,160)}</style><button id="closed-button">Closed shadow button</button><input id="closed-input">';closed.querySelector('button').onclick=()=>post({shadowClicked:true});closed.querySelector('input').oninput=e=>post({shadowText:e.target.value});
-      document.querySelector('#rich').addEventListener('input',e=>post({richText:e.target.innerText,trusted:e.isTrusted}));document.querySelector('#open-popup').onclick=()=>window.open('/popup','shared-popup','width=600,height=450');document.querySelector('#js-prompt').onclick=()=>post({promptResult:prompt('Type a shared answer','initial')});document.querySelector('#show-dialog').onclick=()=>document.querySelector('#native-dialog').showModal();document.querySelector('#close-dialog').onclick=()=>document.querySelector('#native-dialog').close();document.querySelector('#show-popover').onclick=()=>document.querySelector('#native-popover').showPopover();</script></body></html>`);return;
+      document.querySelector('#rich').addEventListener('input',e=>post({richText:e.target.innerText,trusted:e.isTrusted}));document.querySelector('#delayed-popup').onclick=()=>{const child=window.open('about:blank');setTimeout(()=>{child.location.href='/popup';},80);};document.querySelector('#open-popup').onclick=()=>window.open('/popup','shared-popup','width=600,height=450');document.querySelector('#js-prompt').onclick=()=>post({promptResult:prompt('Type a shared answer','initial')});document.querySelector('#show-dialog').onclick=()=>document.querySelector('#native-dialog').showModal();document.querySelector('#close-dialog').onclick=()=>document.querySelector('#native-dialog').close();document.querySelector('#show-popover').onclick=()=>document.querySelector('#native-popover').showPopover();</script></body></html>`);return;
     }
     if (req.url === '/fixture'  || req.url === '/next') {
       state.loads++; state.path = req.url; state.cookie = req.headers.cookie || '';
@@ -114,18 +115,20 @@ try {
   await cdp.call('Target.setDiscoverTargets',{discover:true});
   const listeners=()=>({list:[],addListener(fn){this.list.push(fn);},fire(...args){for(const fn of this.list)fn(...args);}});
   const ids=new Map(),sessions=new Map(),actions=[],videoCommands=[],videoGeometries=[];let sourceFrames=0,offscreenFrames=0;let nextId=0,offscreenSession,offscreenTarget;
+  const navigationCreated=listeners();
   const tabEvents={onCreated:listeners(),onRemoved:listeners(),onUpdated:listeners()},debugEvents={onEvent:listeners(),onDetach:listeners()};
   async function getTabs(){const targets=(await cdp.call('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.targetId!==offscreenTarget);return targets.map(t=>{if(!ids.has(t.targetId))ids.set(t.targetId,++nextId);return{id:ids.get(t.targetId),url:t.url,title:t.title,targetId:t.targetId};});}
   async function getTab(id){const tab=(await getTabs()).find(t=>t.id===id);if(!tab)throw new Error('tab closed');return tab;}
   const messages=listeners(),local={},sessionStorage={},packets=[],receivedInputs=[],commandFailures=[];
   const chrome={
+    webNavigation:{onCreatedNavigationTarget:navigationCreated},
     tabs:{...tabEvents,query:getTabs,get:getTab,remove:async id=>{const tab=await getTab(id);await cdp.call('Target.closeTarget',{targetId:tab.targetId});},create:async({url,active})=>{const created=await cdp.call('Target.createTarget',{url,background:!active});return until(async()=>(await getTabs()).find(t=>t.targetId===created.targetId),'new tab');},reload:async id=>{await cdp.call('Page.reload',{},sessions.get(id));}},
     debugger:{...debugEvents,attach:async({tabId})=>{const tab=await getTab(tabId);const r=await cdp.call('Target.attachToTarget',{targetId:tab.targetId,flatten:true});sessions.set(tabId,r.sessionId);},detach:async({tabId})=>{const sessionId=sessions.get(tabId);sessions.delete(tabId);if(sessionId)await cdp.call('Target.detachFromTarget',{sessionId});},sendCommand:async({tabId},method,params)=>{if(method.includes('Screencast'))videoCommands.push(method);if(method==='Runtime.evaluate'&&params.expression.includes('__tabShareDOM.act(')){actions.push(JSON.parse(params.expression.slice(params.expression.indexOf('.act(')+5,-1)).action);}try{const r=await cdp.call(method,params,sessions.get(tabId));if(realSites&&r.exceptionDetails&&commandFailures.length<100)commandFailures.push({tabId,method,error:String(r.result?.description||r.exceptionDetails.text).slice(0,500)});return r;}catch(error){if(realSites&&commandFailures.length<100)commandFailures.push({tabId,method,error:error.message.slice(0,500)});throw error;}}},
     storage:{local:{get:async keys=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,structuredClone(local[k])])),set:async values=>Object.assign(local,structuredClone(values))},session:{get:async key=>({[key]:sessionStorage[key]}),set:async values=>Object.assign(sessionStorage,values)}},
     runtime:{id:'test-profile',onMessage:messages,onStartup:listeners()},alarms:{create(){},onAlarm:listeners()}
   };
   cdp.listeners.push(m=>{
-    if(m.method==='Target.targetCreated'&&m.params.targetInfo.type==='page'&&m.params.targetInfo.openerId){const t=m.params.targetInfo;void getTabs().then(()=>tabEvents.onCreated.fire({id:ids.get(t.targetId),openerTabId:ids.get(t.openerId),url:t.url}));}
+    if(m.method==='Target.targetCreated'&&m.params.targetInfo.type==='page'&&m.params.targetInfo.openerId){const t=m.params.targetInfo;void getTabs().then(()=>{tabEvents.onCreated.fire({id:ids.get(t.targetId),openerTabId:t.canAccessOpener?ids.get(t.openerId):undefined,url:t.url});navigationCreated.fire({sourceTabId:ids.get(t.openerId),tabId:ids.get(t.targetId)});});}
     if(m.method==='Target.targetDestroyed'){const id=ids.get(m.params.targetId);if(id){tabEvents.onRemoved.fire(id);debugEvents.onDetach.fire({tabId:id},'target_closed');}}
     const tabId=[...sessions].find(([,session])=>session===m.sessionId)?.[0];
     if(m.method==='Page.screencastFrame')sourceFrames++;if(tabId)debugEvents.onEvent.fire({tabId},m.method,m.params);
@@ -135,7 +138,7 @@ try {
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,compressPacket,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
 
   if(rtcEnabled){
@@ -166,7 +169,7 @@ try {
     });
     chrome.runtime.sendMessage=async m=>{
       if(m.target==='offscreen'){
-        if(m.type==='frame')offscreenFrames++;if(m.type==='send'&&m.message.type==='video')videoGeometries.push(m.message.info);
+        if(m.type==='frame')offscreenFrames++;if(m.type==='send-packet'){const mbytes=Uint8Array.from(atob(m.data),c=>c.charCodeAt(0));const packet=await decodeJSONPacket(mbytes);packets.push({at:Date.now(),document:packet.document,bytes:Buffer.byteLength(JSON.stringify(packet)),wireBytes:mbytes.length});}if(m.type==='send'&&m.message.type==='video')videoGeometries.push(m.message.info);
         if(m.type==='send'&&m.message.type==='dom'&&!m.viewerId)packets.push({at:Date.now(),document:m.message.document,bytes:Buffer.byteLength(JSON.stringify(m.message))});
         return cdp.evaluate(offscreenSession,'globalThis.__request('+JSON.stringify(m)+')').catch(error=>{if(m.type==='frame')console.log('Frame bridge failure:',error.message);throw error;});
       }
@@ -204,7 +207,7 @@ try {
   await one.bringToFront();await one.frameLocator('#mirror').locator('#click').hover();
   await until(()=>one.frameLocator('#mirror').locator('#responsive').evaluate(n=>getComputedStyle(n).color==='rgb(10, 90, 160)'),'source hover styles reach a sibling in DOM mirror');
   const settingsBox=await one.locator('#share-settings-toggle').boundingBox();await one.mouse.move(settingsBox.x+10,settingsBox.y+10);
-  await until(()=>one.frameLocator('#mirror').locator('#click').evaluate(n=>getComputedStyle(n).outlineStyle==='none'),'leaving mirror clears hover');
+  await until(()=>one.frameLocator('#mirror').locator('#click').evaluate(n=>getComputedStyle(n).outlineStyle==='none'),'leaving mirror clears hover').catch(async e=>{console.log('Hover reset:',{source:await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({hover:document.querySelector("#click").matches(":hover"),outline:getComputedStyle(document.querySelector("#click")).outlineStyle})',returnByValue:true}).then(r=>r.result.value),target:vm.runInContext('[...targets.values()].map(t=>({last:t.lastSent,next:t.nextSend,pending:t.wakePending,urgent:t.wakeUrgent,timer:!!t.wakeTimer,context:t.contextId,ready:t.documentReady}))',sandbox),inputs:receivedInputs.slice(-4),packets:packets.slice(-3).map(p=>({updates:p.document.updates,meta:p.document.meta}))});throw e;});
   assert.ok(receivedInputs.some(i=>i.action==='mouseLeave'),'source receives explicit mouse leave over both transports');
   console.log('PASS: automatic window reflow, one document scrollbar, trusted hover and mouse leave including sibling CSS');
   await one.locator('#surface').evaluate(e=>{const stage=document.querySelector('#stage').getBoundingClientRect();if(stage.x!==0||stage.y!==0||stage.width!==innerWidth||stage.height!==innerHeight)throw Error('outer chrome consumes shared viewport');});
@@ -227,6 +230,14 @@ try {
     console.log('PASS: RTC failure, fresh fallback DOM, control continues, automatic WebRTC recovery');
   }
   await until(()=>one.locator('#surface').getAttribute('data-syncing').then(v=>v==='false'),'initial progressive DOM complete');
+  for(const title of ['Live title 中文','', 'Shared test tab']){await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'document.title='+JSON.stringify(title)});await until(async()=>(await one.title())===(title||sourceURL)&&await two.frameLocator('#mirror').locator('head title').textContent()===title,'native titles update and clear');}
+  const latency=[];
+  for(let i=0;i<5;i++){
+    await two.evaluate(()=>{const n=document.querySelector('#mirror').contentDocument.querySelector('#responsive');globalThis.probeSeen=0;const observer=new MutationObserver(()=>{globalThis.probeSeen=Date.now();observer.disconnect();});observer.observe(n,{subtree:true,childList:true,characterData:true});});
+    const start=Date.now();await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'document.querySelector("#responsive").textContent='+JSON.stringify('Latency probe '+i)});
+    let seen;await until(async()=>{seen=await two.evaluate(()=>globalThis.probeSeen);return seen>0;},'semantic DOM update reaches the other visitor');latency.push(seen-start);
+  }
+  console.log('DOM change-to-visible latency (ms):',latency);assert.ok([...latency].sort((a,b)=>a-b)[2]<350,'small DOM updates should not wait for a slow video budget');
   const editStart=packets.length;const beforeDirectDOM=relayDocuments,beforeDirectInputs=relayInputs;
   const initial=packets.find(p=>p.document.reset);assert.ok(initial,'one initial DOM snapshot');
   await remoteOne.locator('#click').click();await until(()=>state.clicks===1,'first viewer real click');
@@ -431,8 +442,15 @@ try {
   await reopened.locator('#mirror').waitFor({state:'visible'});assert.equal(await compatibility.locator('[data-tabshare-owner-ui]').count(),0);
   // Move the owner UI away from controls before exercising the source popup.
   await chrome.debugger.sendCommand({tabId:newTab.id},'Runtime.evaluate',{expression:"document.querySelector('[data-tabshare-owner-ui]').style.setProperty('left','1000px','important')"});
-  await compatibility.locator('#open-popup').click();await compatibility.locator('h1').filter({hasText:'Shared induced popup'}).waitFor({state:'visible',timeout:20000});await compatibility.locator('#popup-text').click();await reopened.keyboard.insertText('popup input');await until(()=>compatibility.locator('#popup-text').inputValue().then(v=>v==='popup input'),'popup retains native mirrored input');const popupDownload=reopened.waitForEvent('download');await compatibility.locator('#popup-download').click();assert.equal((await popupDownload).suggestedFilename(),'共享报告.bin');assert.equal(await reopened.locator('#mirror').isVisible(),true);await compatibility.locator('button').click();await compatibility.locator('#closed-button').waitFor({state:'visible',timeout:20000});assert.equal((await getTabs()).find(t=>t.id===newTab.id).targetId,newSources[0].targetId,'popup closes back to original source');
-  console.log('PASS: cookie-bound cross-origin image/CSS/font relay, closed Shadow DOM, pseudo content, trusted rich text selection, JS prompt, native modal/popover, owner and visitor draggable settings, induced popup and return');
+  const childOpened=reopened.waitForEvent('popup');await compatibility.locator('#open-popup').click();const child=await childOpened;
+  await child.locator('#surface').waitFor({state:'visible',timeout:20000});const childPage=child.frameLocator('#mirror');await childPage.locator('h1').filter({hasText:'Shared induced popup'}).waitFor({state:'visible',timeout:20000});
+  await compatibility.locator('#closed-button').waitFor({state:'visible'});assert.equal(await reopened.locator('#mirror').isVisible(),true,'parent remains on its original page');
+  await childPage.locator('#popup-text').click();await child.keyboard.insertText('popup input');await until(()=>childPage.locator('#popup-text').inputValue().then(v=>v==='popup input'),'child has independent native input');
+  const popupDownload=child.waitForEvent('download');await childPage.locator('#popup-download').click();assert.equal((await popupDownload).suggestedFilename(),'共享报告.bin');
+  const childClosed=child.waitForEvent('close');await childPage.locator('button').click();await childClosed;await compatibility.locator('#closed-button').waitFor({state:'visible',timeout:20000});assert.equal((await getTabs()).find(t=>t.id===newTab.id).targetId,newSources[0].targetId,'closing child preserves original source');
+
+  for(const selector of ['#blank-popup','#delayed-popup']){const opened=reopened.waitForEvent('popup');await reopened.bringToFront();await compatibility.locator(selector).click();const extra=await opened;await extra.frameLocator('#mirror').locator('#popup-text').waitFor({state:'visible',timeout:20000});const closed=extra.waitForEvent('close');await extra.frameLocator('#mirror').locator('button').click();await closed;await compatibility.locator('#closed-button').waitFor({state:'visible'});}
+  console.log('PASS: cookie-bound cross-origin image/CSS/font relay, closed Shadow DOM, pseudo content, trusted rich text selection, JS prompt, native modal/popover, owner and visitor draggable settings, independent client tabs for window.open/noopener/delayed navigation, child input/download/close and preserved parent');
   await navigate(reopened,sourceURL.replace('/fixture','/pixel-editor'));
   const pixelEditor=reopened.frameLocator('#mirror').locator('#remote-editor');await pixelEditor.waitFor();
   await pixelEditor.click({position:{x:50,y:48}});

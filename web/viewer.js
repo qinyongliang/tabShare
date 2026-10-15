@@ -4,6 +4,7 @@ import {draggable} from './draggable.js';
 import {RemoteInput} from './remote-input.js';
 import {Downloads} from './downloads.js';
 import {PointerForwarder} from './pointer.js';
+import {PopupWindows} from './popups.js';
 import {shareKey,SharedNavigation} from './navigation.js';
 import {PeerLink} from './peer.js';
 import {Mirror} from './mirror.js';
@@ -17,6 +18,7 @@ let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTime
 const video=document.getElementById('stream');
 const resources=new Resources(id,key,ids=>mirror?.refreshResources(ids));
 const downloads=new Downloads(document,text=>notify(text,true));
+const popupWindows=new PopupWindows(document);
 let contextSeen=0,sourceMode='dom',activeDialog,viewerId,following=false,viewportTimer,lastViewport,queuedViewport,fitFrame,layout;
 let display={mode:'fit',zoom:1};
 try{const saved=JSON.parse(localStorage.getItem('tabshare-display:'+id));if(saved&&['fit','width','actual','custom'].includes(saved.mode)&&Number.isFinite(saved.zoom))display={mode:saved.mode,zoom:Math.max(.25,Math.min(2,saved.zoom))};}catch{}
@@ -117,12 +119,13 @@ function receive(m,direct=false){
   if(m.type==='notice')notify(m.detail||'操作未完成',true);
   if(m.type==='download'){const bytes=Uint8Array.from(atob(m.download.data||''),c=>c.charCodeAt(0));downloadQueue=downloadQueue.then(()=>downloads.accept(m.download,bytes)).catch(e=>notify(e.message,true));}
   if(m.type==='dialog')siteDialog(m.dialog);
+  if(m.type==='popup')popupWindows.receive(m.popup);
   if(m.type==='dom')render(m.document);
   if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;full=false;frame.hidden=false;$('fallback').hidden=true;updateVideo();notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);}
   if(m.type==='raster'){
     if(!m.full){const node=mirror?.nodes.get(m.nodeId);if(node){let image=node.querySelector('img[data-raster]');if(!image){node.replaceChildren();image=mirror.doc.createElement('img');image.dataset.raster='true';node.append(image);}regionStyle(node,image,{...m,...m.region});image.src='data:image/jpeg;base64,'+m.data;}}
   }
-  if(m.type==='status'&&m.status!=='connected'){connected=false;notify(m.detail||'等待共享页面');$('detail').textContent=m.detail||'等待共享浏览器连接。';$('empty').hidden=false;$('surface').hidden=true;$('display-area').hidden=true;}
+  if(m.type==='status'&&m.status!=='connected'){if(m.status==='closed'&&new URLSearchParams(location.search).has('popup'))window.close();connected=false;notify(m.detail||'等待共享页面');$('detail').textContent=m.detail||'等待共享浏览器连接。';$('empty').hidden=false;$('surface').hidden=true;$('display-area').hidden=true;}
 }
 
 function notify(text,live=false){$('status').textContent=text;$('dot').className=live?'live':'';}
@@ -174,7 +177,7 @@ function render(delta){
   const meta=delta.meta||{};if(meta.contextMenu?.sequence!==contextSeen){contextSeen=meta.contextMenu?.sequence;if(meta.contextMenu?.custom)pageMenu.hide();}$('surface').dataset.syncing=String(!!meta.pending);modeSettings(meta.mode);navigation.update(meta);if(!viewportInitialized&&viewerId){viewportInitialized=true;if(autoViewport&&!viewportOwner){following=true;$('follow-viewport').checked=true;queueViewport();}}
   remoteInput.update(meta);if(regionalActive&&!regionalPointer)remoteInput.copySelection(mirror.doc,meta.selection);
   if(meta.url&&document.activeElement!==$('address'))$('address').value=meta.url;
-  if(meta.title)document.title=meta.title+' · TabShare';
+  if(typeof meta.title==='string')document.title=meta.title||meta.url||'共享标签页';
   if(delta.reset||meta.scrollX!==oldMeta?.scrollX||meta.scrollY!==oldMeta?.scrollY)frame.contentWindow.scrollTo(meta.scrollX||0,meta.scrollY||0);
   notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);
 }
@@ -189,7 +192,7 @@ function connect(){
   };
   connection.onclose=event=>{
     if(ws!==connection)return;peer?.close();peer=null;peerReady=false;video.srcObject=null;if(stopped)return;connected=false;
-    if(event.code===1008){stopped=true;notify('分享已撤销，或链接密钥不正确');return;}
+    if(event.code===1008){stopped=true;if(new URLSearchParams(location.search).has('popup'))window.close();notify('分享已撤销，或链接密钥不正确');return;}
     notify('连接已断开，正在重连…');retry=setTimeout(connect,3000);
   };connection.onerror=()=>{};
 }
