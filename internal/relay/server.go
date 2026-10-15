@@ -55,6 +55,7 @@ type RasterRegion struct {
 	Cuts        []RasterCut `json:"cuts,omitempty"`
 }
 type Message struct {
+	Download   *DownloadChunk  `json:"download,omitempty"`
 	Image      *ClipboardImage `json:"image,omitempty"`
 	Region     *RasterRegion   `json:"region,omitempty"`
 	Type       string          `json:"type"`
@@ -712,6 +713,14 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 		case "notice":
 			if len(m.Detail) <= 8192 {
 				s.broadcast(se.ID, Message{Type: "notice", Detail: m.Detail})
+			}
+		case "download":
+			if validDownload(m.Download) {
+				for viewer := range s.live[se.ID].viewers {
+					if viewer.id == m.ViewerID {
+						send(viewer, Message{Type: "download", Download: m.Download})
+					}
+				}
 			}
 		case "dialog":
 			if m.Dialog == nil || (identifier.MatchString(m.Dialog.ID) && len(m.Dialog.Message) <= 8192 && len(m.Dialog.Default) <= 8192) {

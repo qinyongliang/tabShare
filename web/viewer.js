@@ -1,6 +1,8 @@
 import {pasteImage} from './clipboard.js';
 import {contextMenu} from './context-menu.js';
 import {draggable} from './draggable.js';
+import {RemoteInput} from './remote-input.js';
+import {Downloads} from './downloads.js';
 import {shareKey,SharedNavigation} from './navigation.js';
 import {PeerLink} from './peer.js';
 import {Mirror} from './mirror.js';
@@ -13,6 +15,7 @@ const frame=$('mirror');
 let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTimer,lastRegionFrame;
 const video=document.getElementById('stream');
 const resources=new Resources(id,key,ids=>mirror?.refreshResources(ids));
+const downloads=new Downloads(document,text=>notify(text,true));
 let contextSeen=0,sourceMode='dom',activeDialog,viewerId,following=false,viewportTimer,lastViewport,queuedViewport,fitFrame,layout;
 let display={mode:'cover',zoom:1};
 try{const saved=JSON.parse(localStorage.getItem('tabshare-display:'+id));if(saved&&['cover','fit','width','actual','custom'].includes(saved.mode)&&Number.isFinite(saved.zoom))display={mode:saved.mode,zoom:Math.max(.25,Math.min(2,saved.zoom))};}catch{}
@@ -44,6 +47,8 @@ function send(m){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(m));}
 const navigation=new SharedNavigation(window,key,m=>input(m));
 function input(m){if(connected){if(m.nodeId||['text','keyDown','keyUp','mouseMoved','mousePressed','mouseReleased','mouseWheel','scroll','select','selection'].includes(m.action))m={version:mirror?.version,...m};if(peerReady)void peer.send({type:'input',input:m},'input');else send({type:'input',input:m});}}
 const pageMenu=contextMenu(document,{navigate:url=>input({action:'navigate',url}),reload:()=>input({action:'reload'}),error:error=>notify(error.message,true)});
+const remoteInput=new RemoteInput(document,frame,m=>input(m),data=>{const image=[...data.files].find(f=>/^image\/(png|jpeg|gif|webp)$/.test(f.type));if(image)void pasteImage(image,{session:id,key,viewerId,peer:peerReady?peer:null,selection:{version:mirror.version,nodeId:''}}).catch(e=>notify(e.message,true));else input({action:'text',text:data.getData('text/plain').slice(0,8192)});});
+let regionalPointer,regionalActive=false;
 function resync(){if(peerReady)void peer.send({type:'resync'},'input');else send({type:'resync'});}
 function updateVideo(){
   const live=peerReady&&video.readyState>=2&&!video.paused;
@@ -81,7 +86,7 @@ async function signaling(s){
   if(s.description?.type==='offer'&&s.attempt!==peer?.attempt){
     peer?.close();peerReady=false;route='WebRTC 协商中';
     const link=new PeerLink({attempt:s.attempt,iceServers:rtcServers,signal:value=>send({type:'signal',signal:value}),
-      message:(m,channel)=>{if(channel==='state')receive(m,true);},asset:(meta,bytes)=>void resources.add(meta,bytes),
+      message:(m,channel)=>{if(channel==='state')receive(m,true);},asset:(meta,bytes)=>{if(meta.kind==='download-chunk')downloadQueue=downloadQueue.then(()=>downloads.accept(meta,bytes)).catch(e=>notify(e.message,true));else void resources.add(meta,bytes);},
       track:stream=>{video.srcObject=stream;void video.play().catch(()=>{});},
       state:status=>{if(peer!==link)return;peerReady=status==='up';if(peerReady){void link.route().then(value=>{route=value;notify('已连接 · '+route,true);});resync();sendProfile();}else{route='WebSocket 兜底';updateVideo();send({type:'resync'});}}
     });peer=link;
@@ -89,6 +94,7 @@ async function signaling(s){
   if(peer?.attempt===s.attempt)await peer.accept(s);
 }
 let rtcServers=[],viewportOwner,lastProfile,viewportInitialized=false;
+let downloadQueue=Promise.resolve();
 function sendProfile(){
   if(!peerReady||!peer)return;
   const box=$('surface').getBoundingClientRect(),dpr=window.devicePixelRatio||1;
@@ -108,6 +114,7 @@ function receive(m,direct=false){
   if(m.type==='resource')void resources.add(m.asset);
   if(m.type==='resources')for(const asset of m.assets||[])void resources.add(asset);
   if(m.type==='notice')notify(m.detail||'操作未完成',true);
+  if(m.type==='download'){const bytes=Uint8Array.from(atob(m.download.data||''),c=>c.charCodeAt(0));downloadQueue=downloadQueue.then(()=>downloads.accept(m.download,bytes)).catch(e=>notify(e.message,true));}
   if(m.type==='dialog')siteDialog(m.dialog);
   if(m.type==='dom')render(m.document);
   if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;full=false;frame.hidden=false;$('fallback').hidden=true;updateVideo();notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);}
@@ -154,15 +161,16 @@ function fit(){
   const percent=Math.round(layout.scale*100);$('display-percent').value=percent+'%';
   $('display-zoom').value=String(Math.max(25,Math.min(200,percent)));
   const text='共享视口 '+width+' × '+height+' · 显示 '+percent+'%';if($('display-info').textContent!==text)$('display-info').textContent=text;
-  queueViewport();sendProfile();
+  queueViewport();sendProfile();remoteInput.place();
 }
 function render(delta){
   if(!mirror){pending.push(delta);return;}
-  if(delta.reset&&delta.version!==mirror.version)resources.keepVersion(delta.version);
+  if(delta.reset&&delta.version!==mirror.version){resources.keepVersion(delta.version);remoteInput.release();regionalActive=false;regionalPointer=null;}
   const oldMeta=mirror.meta;
   if(!mirror.apply(delta)){resync();return;}
   connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;fit();
   const meta=delta.meta||{};if(meta.contextMenu?.sequence!==contextSeen){contextSeen=meta.contextMenu?.sequence;if(meta.contextMenu?.custom)pageMenu.hide();}$('surface').dataset.syncing=String(!!meta.pending);modeSettings(meta.mode);navigation.update(meta);if(!viewportInitialized&&viewerId){viewportInitialized=true;if(!viewportOwner){following=true;$('follow-viewport').checked=true;queueViewport();}}
+  remoteInput.update(meta);if(regionalActive&&!regionalPointer)remoteInput.copySelection(mirror.doc,meta.selection);
   if(meta.url&&document.activeElement!==$('address'))$('address').value=meta.url;
   if(meta.title)document.title=meta.title+' · TabShare';
   if(delta.reset||meta.scrollX!==oldMeta?.scrollX||meta.scrollY!==oldMeta?.scrollY)frame.contentWindow.scrollTo(meta.scrollX||0,meta.scrollY||0);
@@ -189,6 +197,11 @@ $('reload').onclick=()=>input({action:'reload'});
 $('navigation').onsubmit=e=>{e.preventDefault();try{const u=new URL($('address').value);if(!['http:','https:'].includes(u.protocol))throw new Error();input({action:'navigate',url:u.href});}catch{notify('请输入完整的 HTTP(S) 网址');}};
 function attach(){
   const doc=frame.contentDocument;mirror=new Mirror(doc,resources);
+  doc.addEventListener('pointerdown',e=>{const region=e.target.closest?.('[data-unsupported]');regionalActive=!!region;remoteInput.release();if(region&&e.button===0)regionalPointer={id:e.pointerId,x:e.clientX,y:e.clientY};},true);
+  doc.addEventListener('pointerup',e=>{if(regionalPointer?.id!==e.pointerId)return;const moved=Math.hypot(e.clientX-regionalPointer.x,e.clientY-regionalPointer.y)>6;regionalPointer=null;if(!moved){const r=frame.getBoundingClientRect(),scale=layout?.scale||1;remoteInput.activate(r.left+e.clientX*scale,r.top+e.clientY*scale);}},true);
+  doc.addEventListener('pointercancel',()=>{regionalPointer=null;},true);
+  doc.addEventListener('copy',e=>{if(regionalActive&&mirror.meta?.selection?.text){e.preventDefault();e.clipboardData.setData('text/plain',mirror.meta.selection.text);}},true);
+  doc.addEventListener('keydown',e=>{if(regionalActive&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.target.closest?.('input,textarea,[contenteditable=true]')&&(e.key.length===1||e.key==='Process'||e.keyCode===229)){remoteInput.place();remoteInput.box.focus({preventScroll:true});}},true);
   const pointer=e=>{const node=e.target.closest?.('[data-node-id]');if(!node)return null;const r=node.getBoundingClientRect();return{nodeId:node.dataset.nodeId,x:Math.max(0,Math.min(1,(e.clientX-r.left)/(r.width||1))),y:Math.max(0,Math.min(1,(e.clientY-r.top)/(r.height||1))),modifiers:modifiers(e),buttons:e.buttons,button:['left','middle','right'][e.button]||'none'};};
   let lastMove=0,touch;
   const clearTouch=()=>{touch=null;};doc.addEventListener('pointercancel',clearTouch,true);
@@ -198,7 +211,7 @@ function attach(){
   doc.addEventListener('click',e=>{if(e.target.closest?.('a'))e.preventDefault();},true);
   doc.addEventListener('submit',e=>e.preventDefault(),true);
   doc.addEventListener('contextmenu',e=>{
-    const text=doc.getSelection()?.toString()||'';if(text||e.target.closest?.('input,textarea,[contenteditable=true],img'))return;
+    const text=doc.getSelection()?.toString()||'';if(text||e.target.closest?.('input,textarea,[contenteditable=true],img,[data-unsupported]'))return;
     e.preventDefault();const node=e.target.closest?.('[data-node-id]'),href=mirror.states.get(node?.dataset.nodeId)?.href,box=frame.getBoundingClientRect();
     pageMenu.show({x:box.x+e.clientX*(layout?.scale||1),y:box.y+e.clientY*(layout?.scale||1),text,href,paste:()=>pasteClipboard(e.target)});
   },true);
@@ -251,7 +264,7 @@ new ResizeObserver(requestFit).observe($('stage'));
 let dprQuery;function dprChanged(){dprQuery?.removeEventListener('change',dprChanged);dprQuery=matchMedia('(resolution: '+window.devicePixelRatio+'dppx)');dprQuery.addEventListener('change',dprChanged);requestFit();}dprChanged();
 window.addEventListener('resize',requestFit);window.visualViewport?.addEventListener('resize',requestFit);window.visualViewport?.addEventListener('scroll',requestFit);
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
-window.addEventListener('pagehide',()=>{stopped=true;clearInterval(regionTimer);peer?.close();video.srcObject=null;resources.dispose();ws?.close();});
+window.addEventListener('pagehide',()=>{stopped=true;clearInterval(regionTimer);peer?.close();video.srcObject=null;resources.dispose();downloads.dispose();ws?.close();});
 connect();
 const pixelPoint=e=>{const point=sourcePoint(e,$('fallback').getBoundingClientRect(),mirror?.meta);return point?{...point,button:['left','middle','right'][e.button]||'none',buttons:e.buttons,modifiers:modifiers(e)}:null;};
 let pixelMove=0,pixelTouch,touchTimer;

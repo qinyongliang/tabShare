@@ -36,7 +36,9 @@ test('navigation discards an initializing world and the next attempt creates a f
  const w=await worker(async(method,p)=>{if(method==='Page.createIsolatedWorld'){created++;if(created===1){entered();await gate;}return {executionContextId:40+created};}return normal(method,p);});
  const first=w.run('world(7)');await ready;w.navigate();release();await assert.rejects(first,/正在切换/);
  assert.equal(w.target.contextId,null);assert.equal(await w.run('world(7)'),42);
- assert.ok(w.calls.filter(c=>c.method==='Runtime.evaluate').every(c=>c.params.contextId===42),'old world must not execute after navigation');
+ const evaluations=w.calls.filter(c=>c.method==='Runtime.evaluate');
+ assert.ok(evaluations.every(c=>c.params.contextId===42||c.params.contextId===undefined&&c.params.expression.includes('tabshare.downloadHook')),'old world must not execute after navigation');
+ assert.equal(evaluations.filter(c=>c.params.contextId===undefined).length,1,'only the scoped native download hook runs in the page world');
 });
 
 test('capture timeout retries bounded DOM without switching the page to video',async()=>{

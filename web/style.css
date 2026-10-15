@@ -5,6 +5,7 @@ button{border:1px solid #dce3ee;color:#405475;background:white;padding:8px 11px;
 #display-area{display:block}#surface{position:relative;overflow:hidden;flex-shrink:0;background:white;touch-action:auto}
 #mirror{display:block;position:absolute;inset:0;border:0;background:white;transform-origin:top left}
 #stream{position:absolute;inset:0;object-fit:fill;pointer-events:none}#fallback,#fallback-keyboard{display:none}
+#remote-input{position:fixed;z-index:999;width:2px;min-width:0;padding:0;margin:0;border:0;border-radius:0;outline:0;overflow:hidden;resize:none;color:transparent;caret-color:transparent;background:transparent;opacity:.01;pointer-events:none;white-space:pre}
 #display-area[hidden],#surface[hidden],#mirror[hidden],#stream[hidden]{display:none}
 #empty{margin:15vh auto;text-align:center;color:#7986a0;max-width:520px;padding:25px}#empty h1{font-size:22px;color:#536581}#empty p{line-height:1.7;overflow-wrap:anywhere}
 #share-settings-toggle{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));z-index:1003;background:#335fea;color:white;border:0;border-radius:24px;padding:12px 16px;box-shadow:0 3px 15px #0003;cursor:grab;user-select:none}#share-settings-toggle:active{cursor:grabbing}

@@ -5,6 +5,7 @@ import {installDOM, captureDOM} from './dom-capture.js';
 import {ResourceBridge} from './resources.js';
 
 let config, socket, connecting, retryTimer;
+function downloadClickHook(){const key=Symbol.for('tabshare.downloadHook');if(globalThis[key])return;const original=HTMLAnchorElement.prototype.click;function click(...args){if(this.hasAttribute('download')&&this.href.startsWith('blob:')&&!document.dispatchEvent(new CustomEvent('tabshare-download',{cancelable:true,detail:JSON.stringify({url:this.href,suggestedFilename:this.download})})))return;return original.apply(this,args);}globalThis[key]={original,click};HTMLAnchorElement.prototype.click=click;}
 const bindings = new Map();
 const targets = new Map();
 const opening = new Map();
@@ -149,6 +150,40 @@ function transmit(message) {
 function status(sessionId, value, detail = '', tab = {}) {
   transmit({type: 'status', sessionId, status: value, detail, url: tab.url, title: tab.title});
 }
+function downloadActor(tabId){const t=targets.get(tabId),a=t?.lastActor;return a&&Date.now()-a.time<15000&&bindings.get(a.sessionId)?.tabId===tabId?a:null;}
+async function downloadChunk(tabId,actor,meta,bytes){
+  if(bindings.get(actor.sessionId)?.tabId!==tabId)throw Error('下载来源页面已关闭');
+  meta={kind:'download-chunk',...meta,sha256:Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('')};
+  let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));const data=btoa(raw),peer=peers.get(actor.sessionId+':'+actor.viewerId);
+  if(actor.direct){if(peer?.direct&&await offscreen({type:'download-chunk',sessionId:actor.sessionId,viewerId:actor.viewerId,meta,data}))return;throw Error('P2P 下载连接已中断，请重新下载');}
+  const end=Date.now()+10000;while(socket?.readyState===WebSocket.OPEN&&socket.bufferedAmount>262144&&Date.now()<end)await new Promise(r=>setTimeout(r,25));
+  if(!transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{...meta,data}}))throw Error('下载连接已中断');
+}
+async function downloadResponse(tabId,p){
+  const headers=Object.fromEntries((p.responseHeaders||[]).map(h=>[h.name.toLowerCase(),h.value])),t=targets.get(tabId),actor=t?.downloadActors?.get(p.networkId)||downloadActor(tabId);
+  const hint=actor?.hint||t?.downloadHint,matched=hint&&(actor?.hint||Date.now()-hint.time<10000)&&hint.url===p.request.url;
+  if(!actor||p.responseStatusCode<200||p.responseStatusCode>=300||!(/\battachment\b/i.test(headers['content-disposition']||'')||matched)){await command(tabId,'Fetch.continueRequest',{requestId:p.requestId}).catch(()=>{});return;}
+  const recipient={...actor,direct:!!peers.get(actor.sessionId+':'+actor.viewerId)?.direct};
+  const id=crypto.randomUUID(),disposition=headers['content-disposition']||'';let name=/filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+  if(name)try{name=decodeURIComponent(name);}catch{}name=name||/filename="([^"]+)"/i.exec(disposition)?.[1]||/filename=([^;]+)/i.exec(disposition)?.[1]||hint?.name||new URL(p.request.url).pathname.split('/').pop()||'download';
+  const meta={id,name:name.slice(0,120),mime:(headers['content-type']||'application/octet-stream').split(';')[0].slice(0,100)};
+  let stream,offset=0,reserved=false;
+  try{
+    if((t.downloadCount||0)>=2||Number(headers['content-length'])>64*1024*1024)throw Error('单次下载上限 64 MiB，最多同时转发两个文件');t.downloadCount=(t.downloadCount||0)+1;reserved=true;
+    ({stream}=await command(tabId,'Fetch.takeResponseBodyAsStream',{requestId:p.requestId}));
+    for(;;){const chunk=await command(tabId,'IO.read',{handle:stream,size:262144}),bytes=chunk.base64Encoded?Uint8Array.from(atob(chunk.data),c=>c.charCodeAt(0)):new TextEncoder().encode(chunk.data);if(offset+bytes.length>64*1024*1024)throw Error('下载超过 64 MiB 上限');await downloadChunk(tabId,recipient,{...meta,offset,done:!!chunk.eof},bytes);offset+=bytes.length;if(chunk.eof)break;}
+  }catch(error){transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{id,offset:0,error:error.message.slice(0,500)}});}
+  finally{if(reserved)t.downloadCount--;if(stream){await command(tabId,'IO.close',{handle:stream}).catch(()=>{});await command(tabId,'Fetch.failRequest',{requestId:p.requestId,errorReason:'Aborted'}).catch(()=>{});}else await command(tabId,'Fetch.continueRequest',{requestId:p.requestId}).catch(()=>{});}
+}
+async function downloadBlob(tabId,p){
+  const actor=downloadActor(tabId),t=targets.get(tabId);if(!actor||!p.url.startsWith('blob:'))return;
+  if(t.lastBlob?.url===p.url&&t.lastBlob?.actorTime===actor.time)return;t.lastBlob={url:p.url,actorTime:actor.time};
+  const recipient={...actor,direct:!!peers.get(actor.sessionId+':'+actor.viewerId)?.direct},id=crypto.randomUUID();let reserved=false;
+  try{if((t.downloadCount||0)>=2)throw Error('同时下载数量超过上限');t.downloadCount=(t.downloadCount||0)+1;reserved=true;await world(tabId);
+    for(let offset=0;;){const part=await evaluate(tabId,'globalThis.__tabShareDOM.downloadPart('+JSON.stringify(p.url)+','+offset+')'),bytes=Uint8Array.from(atob(part.data),c=>c.charCodeAt(0));if(offset===0&&p.guid)await command(tabId,'Browser.cancelDownload',{guid:p.guid}).catch(()=>{});await downloadChunk(tabId,recipient,{id,name:String(p.suggestedFilename||'download').slice(0,120),mime:part.mime||'application/octet-stream',offset,done:offset+bytes.length>=part.size},bytes);offset+=bytes.length;if(offset>=part.size)break;}
+  }catch(error){transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{id,offset:0,error:error.message.slice(0,500)}});}
+  finally{if(reserved)t.downloadCount--;await evaluate(tabId,'globalThis.__tabShareDOM.downloadDone('+JSON.stringify(p.url)+')').catch(()=>{});}
+}
 async function connect() {
   if (connecting) return connecting;
   if (socket?.readyState === WebSocket.OPEN) return;
@@ -211,6 +246,7 @@ async function world(tabId) {
   target.contextId = result.executionContextId;
   const contextId=target.contextId;
   await evaluate(tabId, installDOM,contextId);
+  await command(tabId,'Runtime.evaluate',{expression:'('+downloadClickHook.toString()+')()',returnByValue:true}).catch(()=>{});
   await evaluate(tabId, 'globalThis.__tabShareDOM.reset()',contextId);
   if(target.nativeViewport)await evaluate(tabId,'globalThis.__tabShareDOM.ownerViewport('+JSON.stringify(target.nativeViewport)+')',contextId);
   await evaluate(tabId, 'globalThis.__tabShareDOM.setMode('+JSON.stringify(target.mode||'dom')+')',contextId);
@@ -279,7 +315,7 @@ async function snapshot(tabId) {
     }
     target.captureLimited=!!delta.meta?.truncated;
     if(delta.meta?.mode!==target.mode)await rememberMode(target,delta.meta.mode);
-    const requests=delta.resources;delete delta.resources;
+    const requests=delta.resources;delete delta.resources;const downloads=delta.downloads;delete delta.downloads;if(downloads?.length)for(const request of downloads)void downloadBlob(tabId,request);
     if(!target.pending){target.document.apply(delta);target.documentReady=true;}
     if(requests?.length)void target.resources.transfer(requests,target.sessions,resourceConfig());
     let sent = true;
@@ -354,7 +390,7 @@ async function targetFor(tab,mode='dom') {
   let target=targets.get(tab.id);if(target)return target;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
   target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
-  try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});}
+  try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});await command(tab.id,'Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Response'}]});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
   target.timer=setInterval(()=>void snapshot(tab.id),200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
 }
@@ -407,6 +443,7 @@ async function pause(sessionId) {
   target.resources?.dispose();
   if(target.viewport)try{await command(binding.tabId,'Emulation.clearDeviceMetricsOverride');}catch{}
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
+  await command(binding.tabId,'Runtime.evaluate',{expression:"(()=>{const key=Symbol.for('tabshare.downloadHook'),hook=globalThis[key];if(hook){if(HTMLAnchorElement.prototype.click===hook.click)HTMLAnchorElement.prototype.click=hook.original;delete globalThis[key];}})()",returnByValue:true}).catch(()=>{});
   targets.delete(binding.tabId);
   await command(binding.tabId,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
   try { await chrome.debugger.detach({tabId: binding.tabId}); } catch { /* Already closed/detached. */ }
@@ -419,6 +456,7 @@ async function control(message) {
   const {action} = input;
   const target=targets.get(binding.tabId);
   if(input.version&&(!target.documentReady||input.version!==target.document.version))return;
+  if(input.viewerId&&['mousePressed','mouseReleased','keyDown','text'].includes(action))target.lastActor={sessionId:message.sessionId,viewerId:input.viewerId,time:Date.now()};
   if(action==='pasteImage'){const paste=async()=>{
     if(!['image/png','image/jpeg','image/webp','image/gif'].includes(input.mime)||typeof input.data!=='string'||input.data.length>Math.ceil(4*1024*1024/3)*4||!/^[-A-Za-z0-9+/=]+$/.test(input.data))return;
     await world(binding.tabId);
@@ -439,6 +477,7 @@ async function control(message) {
     await world(binding.tabId);
     const point = await evaluate(binding.tabId, 'globalThis.__tabShareDOM.act(' + JSON.stringify(input) + ')');
     if(point?.stale){target.nextSend=0;return;}
+    if(point?.download)target.downloadHint={...point.download,time:Date.now()};
     if(action==='select'){if(point?.key){for(const key of [point,{key:'Enter',code:'Enter',keyCode:13}])for(const action of ['keyDown','keyUp']){const [method,params]=cdpInput({action,...key});await command(binding.tabId,method,params);}await evaluate(binding.tabId,'globalThis.__tabShareDOM.act('+JSON.stringify({...input,action:'selectFinish'})+')');}return;}
     if (action === 'scroll' || action === 'selection') return;
     input = {...input, ...point};
@@ -452,6 +491,10 @@ async function control(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
   if(!target)return;
+  if(method==='Network.requestWillBeSent'&&params.type==='Document'){const actor=downloadActor(source.tabId);if(actor){target.downloadActors||=new Map();if(!target.downloadActors.has(params.requestId)){if(target.downloadActors.size>=32)target.downloadActors.delete(target.downloadActors.keys().next().value);target.downloadActors.set(params.requestId,{...actor,hint:target.downloadHint?.url===params.request.url?target.downloadHint:null});}}}
+  if(method==='Network.loadingFinished'||method==='Network.loadingFailed')target.downloadActors?.delete(params.requestId);
+  if(method==='Fetch.requestPaused'){void downloadResponse(source.tabId,params);return;}
+  if(method==='Page.downloadWillBegin'){void downloadBlob(source.tabId,params);return;}
   if(method==='Page.screencastFrame'){
     const ack=()=>command(source.tabId,'Page.screencastFrameAck',{sessionId:params.sessionId}).catch(()=>{});
     if(!target.streaming||target.frameBusy||Date.now()-(target.lastFrame||0)<1000/(target.videoFPS||30)){void ack();return;}

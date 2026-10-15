@@ -12,6 +12,7 @@ async function handle(m) {
   }
   if(m.type==='layout'){const layout=videoLayout(m.info);layouts.set(m.tabId,layout);captures.get(m.tabId)?.setLayout?.(layout);return layout;}
   if(m.type==='inspect')return {peers:[...peers.values()].map(p=>({tabId:p.tabId,ready:p.ready,track:p.sender?.track?.readyState,profile:p.profile,stats:p.stats,queued:p.queued,video:p.sender?.getParameters().encodings?.[0]})),captures:[...captures].map(([tabId,c])=>({tabId,width:c.canvas?.width,height:c.canvas?.height,state:c.track.readyState}))};
+  if(m.type==='download-chunk'){const p=peers.get(key(m));if(!p?.ready)return false;return p.sendAsset(m.meta,Uint8Array.from(atob(m.data),c=>c.charCodeAt(0)));}
   if(m.type==='peer'){
     const k=key(m);remove(k);
     const p=new PeerLink({host:true,iceServers:m.iceServers,signal:signal=>tell({type:'signal',sessionId:m.sessionId,viewerId:m.viewerId,signal}),
