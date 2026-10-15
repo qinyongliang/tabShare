@@ -74,8 +74,8 @@ docs/            使用、部署与实现文档
 例如，在准备发布的主分支提交上创建并推送标签：
 
 ```sh
-git tag v0.7.0
-git push origin v0.7.0
+git tag v0.7.1
+git push origin v0.7.1
 ```
 
 本地创建标签不会触发 GitHub 构建，必须将标签推送到远端。发布只接受对应标签提交上的成功构建，七个构建产物必须齐全且未过期，上传前逐一核对 SHA-256。发布流程通过 `GITHUB_TOKEN` 获得本仓库的 Actions 读取和 Release 写入权限，无需配置额外令牌。
