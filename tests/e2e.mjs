@@ -140,7 +140,7 @@ try {
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,GeolocationBroker,geolocationHook,DownloadAcks,ResourceBridge:TestResources,DocumentState,compressPacket,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,URL,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,GeolocationBroker,geolocationHook,DownloadAcks,ResourceBridge:TestResources,DocumentState,compressPacket,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
 
   if(rtcEnabled){
