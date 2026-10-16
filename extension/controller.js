@@ -61,6 +61,7 @@ export async function rasterFrame(capture,options) {
 // Direct input has the same allowlist and bounds as relay input. Never accept CDP methods.
 export function validPeerInput(i) {
   if(!i||typeof i!=='object'||new TextEncoder().encode(JSON.stringify(i)).length>16384)return false;
+  if(i.requestId!=null&&(typeof i.requestId!=='string'||!/^[A-Za-z0-9_-]{8,64}$/.test(i.requestId)))return false;
   const bounded=(v,min,max)=>typeof v==='number'&&Number.isFinite(v)&&v>=min&&v<=max;
   const short=(v,n)=>v==null||typeof v==='string'&&new TextEncoder().encode(v).length<=n;
   if(!short(i.version,80)||!short(i.text,8192)||!short(i.key,64)||!short(i.code,64)||!short(i.nodeId,32)||!bounded(i.modifiers??0,0,15))return false;

@@ -96,7 +96,8 @@ function enqueueInput(message){
   const binding=bindings.get(message.sessionId),target=binding&&targets.get(binding.tabId);if(!target)return;
   const member=peers.has(message.sessionId+':'+message.input.viewerId);
   if(message.input.action==='downloadAck'||message.input.action==='geolocationResult')return control(message);
-  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);if(['mouseMoved','mouseLeave','mouseReleased','text','keyDown','scroll','select'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;requestSnapshot(binding.tabId,true);}return result;}catch(error){if(contextChanged(error)){target.pending=null;target.nextSend=0;return;}if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
+  const ack=status=>{if(message.input.requestId)transmit({type:'input-ack',sessionId:message.sessionId,viewerId:message.input.viewerId,requestId:message.input.requestId,status});};
+  const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);ack('accepted');if(['mouseMoved','mouseLeave','mouseReleased','text','keyDown','scroll','select'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;requestSnapshot(binding.tabId,true);}return result;}catch(error){if(contextChanged(error)){ack('accepted');target.pending=null;target.nextSend=0;return;}ack('error');if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
   if(message.input.action==='dialog')return run();
   target.inputs??=new InputQueue();
   const key=message.input.action==='mouseMoved'?'move:'+message.input.viewerId:null;
@@ -390,8 +391,11 @@ async function snapshot(tabId) {
     const building=wasBuilding&&delta.meta?.pending;target.building=building;
     // Coalesce mutations while paying down a byte budget. Initial state is sent only once.
     const bytes=packed.length,now=Date.now();
-    target.byteCredit=Math.min(32768,(target.byteCredit??32768)+(now-(target.budgetAt||now))*131072/1000)-bytes;
-    target.budgetAt=target.lastSent=now;target.byteDelayUntil=now+Math.max(0,-target.byteCredit)/131072*1000;
+    // Burst initial trees quickly; sustained changes stay bounded. Socket/data-
+    // channel buffering provides the hard backpressure, not a 128 KiB/s UI ceiling.
+    const rate=wasBuilding?4*1024*1024:1024*1024,burst=wasBuilding?512*1024:128*1024;
+    target.byteCredit=Math.min(burst,(target.byteCredit??burst)+(now-(target.budgetAt||now))*rate/1000)-bytes;
+    target.budgetAt=target.lastSent=now;target.byteDelayUntil=now+Math.max(0,-target.byteCredit)/rate*1000;
     target.nextSend=Math.max(now+16,target.byteDelayUntil);
     if(delta.meta?.pending){clearTimeout(target.progressTimer);target.progressTimer=setTimeout(()=>void snapshot(tabId),Math.max(16,target.nextSend-Date.now()+1));}
   } catch (error) {

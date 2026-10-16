@@ -56,6 +56,7 @@ type RasterRegion struct {
 	Cuts        []RasterCut `json:"cuts,omitempty"`
 }
 type Message struct {
+	RequestID    string          `json:"requestId,omitempty"`
 	Popup        *Popup          `json:"popup,omitempty"`
 	Download     *DownloadChunk  `json:"download,omitempty"`
 	Image        *ClipboardImage `json:"image,omitempty"`
@@ -94,6 +95,7 @@ type Popup struct {
 	Title    string `json:"title"`
 }
 type Input struct {
+	RequestID         string     `json:"requestId,omitempty"`
 	Version           string     `json:"version,omitempty"`
 	EntryID           int        `json:"entryId,omitempty"`
 	Action            string     `json:"action"`
@@ -762,6 +764,14 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			if len(m.Detail) <= 8192 {
 				s.broadcast(se.ID, Message{Type: "notice", Detail: m.Detail})
 			}
+		case "input-ack":
+			if len(m.RequestID) <= 64 && identifier.MatchString(m.RequestID) && (m.Status == "accepted" || m.Status == "error") {
+				for viewer := range s.live[se.ID].viewers {
+					if viewer.id == m.ViewerID {
+						send(viewer, Message{Type: "input-ack", RequestID: m.RequestID, Status: m.Status})
+					}
+				}
+			}
 		case "geolocation":
 			if len(m.Data) <= 4096 && json.Valid([]byte(m.Data)) {
 				for viewer := range s.live[se.ID].viewers {
@@ -969,6 +979,9 @@ func (s *Server) viewerWS(w http.ResponseWriter, r *http.Request) {
 }
 func validInput(i *Input) bool {
 	if i == nil || len(i.Version) > 80 || i.Modifiers < 0 || i.Modifiers > 15 || len(i.Text) > 8192 || len(i.Key) > 64 || len(i.Code) > 64 || len(i.NodeID) > 32 {
+		return false
+	}
+	if i.RequestID != "" && (len(i.RequestID) > 64 || !identifier.MatchString(i.RequestID)) {
 		return false
 	}
 	if i.Selection != nil {

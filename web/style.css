@@ -25,3 +25,12 @@ button{border:1px solid #dce3ee;color:#405475;background:white;padding:8px 11px;
 #location-requests{position:fixed;top:16px;right:16px;z-index:2147483646;max-width:min(420px,calc(100vw - 32px));max-height:80vh;overflow:auto}
 #location-requests>div{background:#fff;color:#24324a;border:1px solid #ccd5e5;border-radius:12px;padding:16px;margin-bottom:8px;box-shadow:0 4px 20px #0003}
 #location-requests button{margin:4px;padding:8px 12px}
+
+/* Loading and interaction feedback lives in the trusted viewer, not source scripts. */
+#sync-feedback{position:fixed;z-index:1001;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:9px;padding:9px 14px;max-width:calc(100vw - 24px);border:1px solid #dae3f2;border-radius:24px;background:#fffffff5;color:#405475;box-shadow:0 3px 16px #15243d18;pointer-events:none;font-size:13px}
+#sync-feedback[hidden]{display:none}.sync-spinner{display:inline-block;flex-shrink:0;width:18px;height:18px;border:2px solid #dbe4fa;border-top-color:#335fea;border-radius:50%;animation:ts-spin .75s linear infinite}
+#sync-feedback[data-busy=false] .sync-spinner{display:none}
+:root[data-initial-sync=true] #display-area{visibility:hidden}
+:root[data-initial-sync=true] #stage::after{content:'正在同步共享页面';position:absolute;top:42%;left:0;right:0;text-align:center;color:#708099;font-size:15px}
+@keyframes ts-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.sync-spinner{animation:none;border-style:dotted}}

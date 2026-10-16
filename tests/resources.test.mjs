@@ -26,7 +26,7 @@ test('already delivered resources do not consume the transfer budget',async()=>{
   await bridge.transfer([{id:'cached'}],['room'],{deliver:async()=>({relay:false,sentBytes:0})});
   assert.deepEqual(waits,[]);
   await bridge.transfer([{id:'cached'}],['room'],{deliver:async()=>({relay:false,sentBytes:256*1024})});
-  assert.deepEqual(waits,[1000]);
+  assert.deepEqual(waits,[],'transport backpressure replaces the artificial per-byte delay');
   bridge.dispose();
 });
 
@@ -52,4 +52,27 @@ test('a discarded relay upload or transport switch cannot leave a stale delivere
       assert.equal(item.sent.has('room'),expected);
     }
   }finally{globalThis.fetch=fetch;bridge.dispose();}
+});
+
+
+test('resource reads are concurrent, bounded, and deduplicate an in-flight id',async()=>{
+  const bridge=new ResourceBridge(async()=>{},async()=>{});bridge.scan=async()=>{};
+  let active=0,peak=0,reads=0;const releases=[];const delivered=[];
+  bridge.read=async()=>{reads++;active++;peak=Math.max(peak,active);await new Promise(resolve=>releases.push(resolve));active--;return {content:'image',mime:'image/png'};};
+  const config={deliver:async(session,id)=>{delivered.push([session,id]);return false;}};
+  const job=bridge.transfer(Array.from({length:8},(_,i)=>({id:'doc_'+i,url:'https://example.com/'+i})),['a'],config);
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(peak,4);assert.equal(reads,4);
+  const duplicate=bridge.transfer([{id:'doc_0',url:'https://example.com/0'}],['b'],config);
+  releases.splice(0).forEach(resolve=>resolve());await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(reads,8);assert.equal(peak,4);releases.splice(0).forEach(resolve=>resolve());
+  await Promise.all([job,duplicate]);assert.equal(reads,8);assert.ok(delivered.some(([session,id])=>session==='b'&&id==='doc_0'));
+  assert.equal(bridge.activeTransfers.size,0);bridge.dispose();
+});
+
+test('stale parallel reads cannot repopulate a reset document',async()=>{
+ const bridge=new ResourceBridge(async()=>{},async()=>{});bridge.scan=async()=>{};let release;
+ bridge.read=()=>new Promise(resolve=>{release=()=>resolve({content:'old',mime:'image/png'});});
+ let deliveries=0;const job=bridge.transfer([{id:'old_0',url:'https://example.com'}],['viewer'],{deliver:async()=>{deliveries++;return false;}});
+ await new Promise(resolve=>setImmediate(resolve));bridge.reset();release();await job;
+ assert.equal(deliveries,0);assert.equal(bridge.done.size,0);assert.equal(bridge.bytesRetained,0);bridge.dispose();
 });

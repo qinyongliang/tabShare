@@ -10,7 +10,8 @@
     "pretest:transport": "go build -o bin/tabshare ./cmd/tabshare",
     "test:transport": "node tests/transport.mjs",
     "pretest:sites": "go build -o bin/tabshare ./cmd/tabshare",
-    "test:sites": "node tests/e2e.mjs --real-sites"
+    "test:sites": "node tests/e2e.mjs --real-sites",
+    "test:feedback": "node tests/feedback-browser.mjs"
   },
   "engines": {
     "node": ">=22"

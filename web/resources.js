@@ -1,5 +1,8 @@
 export class Resources {
-  constructor(session,key,ready){this.session=session;this.key=key;this.ready=ready;this.urls=new Map();this.hashes=new Map();this.pending=new Map();this.bytes=0;this.reserved=0;this.sizes=new Map();this.controller=new AbortController();this.changed=new Set();this.notice=null;this.future=new Map();this.retired=new Set();}
+  constructor(session,key,ready){this.session=session;this.key=key;this.ready=ready;this.urls=new Map();this.hashes=new Map();this.pending=new Map();this.bytes=0;this.reserved=0;this.sizes=new Map();this.controller=new AbortController();this.changed=new Set();this.notice=null;this.future=new Map();this.retired=new Set();this.documentReady=new Promise(resolve=>{this.resolveDocument=resolve;});}
+  // Parse SVG in the script-disabled mirror's realm. The viewer shell keeps its
+  // strict style-src policy; inherited shell CSP must not reject SVG styles.
+  setDocument(doc){this.document=doc;this.resolveDocument?.(doc);this.resolveDocument=null;}
   // State and assets use independent ordered channels. Assets can arrive before
   // the compressed DOM for their document, including across rapid navigations.
   acceptVersion(version){
@@ -33,20 +36,23 @@ export class Resources {
       const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('');
       if(hash!==meta.sha256||this.controller.signal.aborted||version!==this.version&&!this.future.has(version)||this.retired.has(version))return;
       let url=this.hashes.get(hash);
-      if(!url){let data=bytes;
+      if(!url){let data=bytes,realm=globalThis;
         if(meta.mime==='image/svg+xml'){
-          const doc=new DOMParser().parseFromString(new TextDecoder().decode(bytes),'image/svg+xml');
-          if(doc.querySelector('parsererror'))return;
+          const context=this.document||await this.documentReady;
+          if(!context||this.controller.signal.aborted)return;
+          realm=context.defaultView;
+          const doc=new context.defaultView.DOMParser().parseFromString(new TextDecoder().decode(bytes),'image/svg+xml');
+          if(doc.querySelector('parsererror')||doc.documentElement.localName!=='svg'||doc.documentElement.namespaceURI!=='http://www.w3.org/2000/svg')return;
           doc.querySelectorAll('script,foreignObject,iframe,object,embed').forEach(n=>n.remove());
           const externalURL=value=>{let external=false;value.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi,(_,a,b,c)=>{if(!(a??b??c).startsWith('#'))external=true;return '';});return external;};
           for(const node of doc.querySelectorAll('*'))for(const attr of [...node.attributes])if(/^on/i.test(attr.name)||/(href|src)$/i.test(attr.name)&&!attr.value.startsWith('#')||externalURL(attr.value))node.removeAttribute(attr.name);
           data=new XMLSerializer().serializeToString(doc);
         }
-        url=URL.createObjectURL(new Blob([data],{type:meta.mime}));this.hashes.set(hash,url);this.sizes.set(hash,meta.size);this.bytes+=meta.size;
+        url=realm.URL.createObjectURL(new realm.Blob([data],{type:meta.mime}));this.hashes.set(hash,url);this.sizes.set(hash,meta.size);this.bytes+=meta.size;
       }
       this.urls.set(meta.id,url);this.changed.add(meta.id);
       if(this.notice===null)this.notice=setTimeout(()=>{this.notice=null;const ids=[...this.changed];this.changed.clear();this.ready(ids);},16);
-    })().catch(()=>{}).finally(()=>{this.pending.delete(meta.id);this.reserved-=meta.size;});this.pending.set(meta.id,job);
+    })().catch(()=>{}).finally(()=>{this.pending.delete(meta.id);this.reserved-=meta.size;});this.pending.set(meta.id,job);return job;
   }
   resolve(value) {
     return String(value).replace(/ts-asset:([A-Za-z0-9_-]+)/g,(_,id)=>this.urls.get(id)||'');
@@ -55,5 +61,5 @@ export class Resources {
     if(this.version&&this.version!==version){this.retired.add(this.version);this.forgetVersion(this.version);if(this.retired.size>256)this.retired.delete(this.retired.values().next().value);}
     this.version=version;this.future.delete(version);this.retired.delete(version);this.collect();
   }
-  dispose(){clearTimeout(this.notice);this.changed.clear();this.controller.abort();for(const url of this.hashes.values())URL.revokeObjectURL(url);this.urls.clear();this.hashes.clear();this.sizes.clear();this.bytes=0;this.future.clear();this.retired.clear();this.pending.clear();}
+  dispose(){this.resolveDocument?.(null);this.resolveDocument=null;this.document=null;clearTimeout(this.notice);this.changed.clear();this.controller.abort();for(const url of this.hashes.values())URL.revokeObjectURL(url);this.urls.clear();this.hashes.clear();this.sizes.clear();this.bytes=0;this.future.clear();this.retired.clear();this.pending.clear();}
 }

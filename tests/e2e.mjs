@@ -73,7 +73,7 @@ try {
   assets=http.createServer((req,res)=>{assetHits.push({url:req.url,cookie:req.headers.cookie||''});
     if(req.url==='/font.ttf'){res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Content-Type','font/ttf');res.end(font);return;}
     if(req.url==='/styles.css'){res.setHeader('Content-Type','text/css');res.end('@font-face{font-family:SharedFont;src:url("/font.ttf")}#badge{font-family:SharedFont}');return;}
-    res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#ea5685"/></svg>');
+    res.setHeader('Content-Type','image/svg+xml');res.end('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><style>rect{fill:#ea5685}</style><rect width="80" height="40"/></svg>');
   });await new Promise(resolve=>assets.listen(0,'127.0.0.1',resolve));assetOrigin=`http://127.0.0.1:${assets.address().port}`;
   fixture = http.createServer(async (req, res) => {
     if(req.url.startsWith('/extension/')){const name=req.url.split('/').pop();if(!['offscreen.html','offscreen.js','peer.js','video-layout.js','video-capture.js'].includes(name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':'text/html');res.end(await readFile(path.join(root,'extension',name)));return;}

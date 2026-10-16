@@ -37,3 +37,14 @@ GET/POST只消费原始响应，不重复请求；Blob在源页面早期抓取 U
 ## 尚须在原任务环境执行
 
 Go race/vet、真实浏览器 optimizations、WebSocket 与 TURN E2E、1/5/10访客弱网，及以上功能矩阵。dot 工作区没有可用 Go 工具链，浏览器执行和本地服务连通受阻，故不得将这些项标为已通过。所有新改动通过后再打包发布。
+
+
+## 0.8.1 样式与加载反馈回归
+
+- Node 单元：资源四路并发、同 id 在途去重、导航丢弃旧资源、本地反馈计时、ACK 归属和非法 id。
+- Go：input-ack 仅发给指定访客；镜像 CSP 允许样式但禁止脚本，外壳 style-src self 保持不变。
+- 浏览器新增 `npm run test:feedback`：严格外壳 CSP + sandbox 镜像中验证带 style 的 SVG 像素；点击后无需等网络的原生 CSS 转动动画；首屏构建完成前隐藏不完整树；3000 个原生 SVG 节点/文字的完整性和几何比较。
+- 扩展与服务器需同时更新以获得 input-ack。旧组合可能显示等待反馈，不能把它等同于业务执行失败。
+- prepare.js 等扩展尝试在 sandbox iframe 注入脚本时，浏览器可能继续记录 script blocked；不通过 allow-scripts 消除此保护日志。
+- dot 当前云端命令沙箱阻止 Chromium 所需的 socket 与 TURN 路由查询；本地 Node 和非 TURN Go 回归可执行，完整浏览器/TURN 验证由仓库 Actions 执行，以最终运行结果为准。
+- 部署域名在 dot 云端浏览器和 HTTP 读取中返回 502；尚不能将受控 fixture 通过表述为该部署现场已验证。
