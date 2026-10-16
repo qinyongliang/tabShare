@@ -226,7 +226,7 @@ try {
   await one.screenshot({path:path.join(root,'test-results','compact-settings-'+(rtcEnabled?'rtc':'relay')+'.png')});
   await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:`(()=>{const b=document.createElement('button');b.id='mode-probe';b.textContent='Video input probe';b.style.cssText='position:fixed;left:20px;top:20px;z-index:2147483646;width:160px;height:40px';b.onclick=()=>{globalThis.__modeProbeClicks=(globalThis.__modeProbeClicks||0)+1;};document.body.append(b);})()`});
   for(let round=0;round<2;round++){
-    await one.locator('[name=share-mode][value=raster]').check();
+    await one.locator('.segmented label').nth(1).click();
     await until(()=>two.locator('[name=share-mode][value=raster]').isChecked(),'mode is authoritative across viewers');
     await until(()=>one.locator('#mirror').isHidden(),'DOM surface hidden in video mode');
     if(rtcEnabled)await until(()=>one.locator('#stream').evaluate(v=>!v.hidden&&v.readyState>=2&&v.videoWidth>0),'full WebRTC video becomes live');
@@ -234,7 +234,7 @@ try {
     const surface=await one.locator('#fallback').boundingBox(),dimensions=await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight})',returnByValue:true}).then(r=>r.result.value);
     await one.mouse.click(surface.x+100*surface.width/dimensions.width,surface.y+40*surface.height/dimensions.height);
     await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'globalThis.__modeProbeClicks',returnByValue:true}).then(r=>r.result.value===round+1),'video coordinates reach the real tab');
-    await one.locator('[name=share-mode][value=dom]').check();
+    await one.locator('.segmented label').nth(0).click();
     await until(()=>one.locator('#mirror').isVisible(),'DOM mode restored');
     await until(()=>two.locator('[name=share-mode][value=dom]').isChecked(),'other viewer returns to DOM');
     await one.frameLocator('#mirror').locator('#mode-probe').waitFor();
