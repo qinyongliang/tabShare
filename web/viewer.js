@@ -33,7 +33,7 @@ $('display-sizing').onchange=displaySettings;
 $('display-zoom').oninput=()=>{$('display-sizing').value='custom';displaySettings();};
 $('follow-viewport').onchange=()=>{following=$('follow-viewport').checked;lastViewport=null;if(!following)input({action:'restoreViewport'});queueViewport();};
 $('restore-viewport').onclick=()=>{following=false;$('follow-viewport').checked=false;clearTimeout(viewportTimer);input({action:'restoreViewport'});};
-function exitImmersive(){document.body.classList.remove('immersive');$('fullscreen').textContent='⛶';$('fullscreen').setAttribute('aria-label','全屏显示共享页面');requestFit();}
+function exitImmersive(){document.body.classList.remove('immersive');$('fullscreen').textContent='全屏';$('fullscreen').setAttribute('aria-label','全屏显示共享页面');requestFit();}
 $('fullscreen').onclick=async()=>{
   if(document.fullscreenElement){await document.exitFullscreen();return;}
   if(document.body.classList.contains('immersive')){exitImmersive();return;}
