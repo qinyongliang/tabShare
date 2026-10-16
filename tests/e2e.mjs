@@ -231,6 +231,7 @@ try {
     await until(()=>one.locator('#mirror').isHidden(),'DOM surface hidden in video mode');
     if(rtcEnabled)await until(()=>one.locator('#stream').evaluate(v=>!v.hidden&&v.readyState>=2&&v.videoWidth>0),'full WebRTC video becomes live');
     else await until(()=>one.locator('#fallback').evaluate(v=>!v.hidden&&v.complete&&v.naturalWidth>0),'full frame relay fallback becomes live');
+    if(round===0){const late=await view(share.value.shareUrl);await until(()=>late.locator('[name=share-mode][value=raster]').isChecked(),'late viewer receives active video mode');await until(()=>late.locator('#mirror').isHidden(),'late viewer does not flash the DOM');await late.close();}
     const surface=await one.locator('#fallback').boundingBox(),dimensions=await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight})',returnByValue:true}).then(r=>r.result.value);
     await one.mouse.click(surface.x+100*surface.width/dimensions.width,surface.y+40*surface.height/dimensions.height);
     await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'globalThis.__modeProbeClicks',returnByValue:true}).then(r=>r.result.value===round+1),'video coordinates reach the real tab');
@@ -255,7 +256,7 @@ try {
   assert.ok(receivedInputs.some(i=>i.action==='mouseLeave'),'source receives explicit mouse leave over both transports');
   console.log('PASS: automatic window reflow, one document scrollbar, trusted hover and mouse leave including sibling CSS');
   await one.locator('#surface').evaluate(e=>{const stage=document.querySelector('#stage').getBoundingClientRect();if(stage.x!==0||stage.y!==0||stage.width!==innerWidth||stage.height!==innerHeight)throw Error('outer chrome consumes shared viewport');});
-  const handle=one.locator('#share-settings-toggle');assert.equal(await handle.textContent(),'共享设置');const beforeDrag=await handle.boundingBox();
+  const handle=one.locator('#share-settings-toggle');assert.equal(await handle.getAttribute('aria-label'),'共享设置');assert.equal((await handle.textContent()).trim(),'◈ 共享');const beforeDrag=await handle.boundingBox();
   await one.mouse.move(beforeDrag.x+20,beforeDrag.y+20);await one.mouse.down();await one.mouse.move(beforeDrag.x-130,beforeDrag.y-130,{steps:8});await one.mouse.up();
   assert.equal(await one.locator('#share-settings').isVisible(),false,'dragging must not open settings');
   const afterDrag=await handle.boundingBox();assert.ok(afterDrag.x<beforeDrag.x-100&&afterDrag.y<beforeDrag.y-100);
