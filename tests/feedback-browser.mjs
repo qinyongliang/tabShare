@@ -16,14 +16,14 @@ const server=http.createServer(async(req,res)=>{
   res.setHeader('Content-Type','text/html; charset=utf-8');
   if(path==='/source'){res.end(sourceHTML);return;}
   if(path==='/mirror.html'){res.end('<!doctype html><html><head></head><body></body></html>');return;}
-  res.end('<!doctype html><html><head><link rel="stylesheet" href="/web/style.css"><link rel="stylesheet" href="/feedback-fixture.css"></head><body><button id="click">Action</button><div id="sync-feedback" role="status" hidden><span class="sync-spinner"></span><span data-feedback-label></span></div><div id="display-area"><iframe id="mirror" sandbox="allow-same-origin" src="/mirror.html" width="1000" height="800"></iframe></div></body></html>');
+  res.end('<!doctype html><html><head><link rel="stylesheet" href="/web/style.css"><link rel="stylesheet" href="/feedback-fixture.css"></head><body><button id="click">Action</button><div id="sync-feedback" role="status" hidden><span class="sync-spinner"></span></div><div id="display-area"><iframe id="mirror" sandbox="allow-same-origin" src="/mirror.html" width="1000" height="800"></iframe></div></body></html>');
  }catch(error){res.statusCode=500;res.end(error.message);}
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
 try{
  const origin='http://127.0.0.1:'+server.address().port,viewer=await browser.newPage({viewport:{width:1200,height:900}}),source=await browser.newPage({viewport:{width:1200,height:900}});
- const errors=[];viewer.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
+ const errors=[];viewer.on('pageerror',error=>errors.push(error.message));viewer.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
  await viewer.goto(origin);await viewer.frameLocator('#mirror').locator('body').waitFor({state:'attached'});
  const asset=await viewer.evaluate(async()=>{
   const {Resources}=await import('/web/resources.js');const frame=document.querySelector('#mirror');
@@ -44,7 +44,7 @@ try{
  });
  await viewer.locator('#click').click();
  const immediate=await viewer.locator('#sync-feedback').evaluate(element=>({visible:!element.hidden,text:element.textContent,animation:getComputedStyle(element.querySelector('.sync-spinner')).animationName,transform:getComputedStyle(element.querySelector('.sync-spinner')).transform}));
- assert.equal(immediate.visible,true);assert.match(immediate.text,/正在发送/);assert.equal(immediate.animation,'ts-spin');
+ assert.deepEqual(errors,[]);assert.equal(immediate.visible,true);assert.equal(immediate.text,'');assert.equal(immediate.animation,'ts-spin');
  await viewer.waitForTimeout(100);const transform=await viewer.locator('.sync-spinner').evaluate(element=>getComputedStyle(element).transform);assert.notEqual(transform,immediate.transform);
  await viewer.evaluate(()=>feedback.acknowledge(requestId,'accepted'));await viewer.locator('#sync-feedback').waitFor({state:'hidden',timeout:2000});
  await viewer.evaluate(()=>feedback.progress({version:'building',meta:{pending:true}}));assert.equal(await viewer.locator('#display-area').evaluate(element=>getComputedStyle(element).visibility),'hidden');
@@ -57,6 +57,7 @@ try{
  const nodes=chunks.flatMap(chunk=>chunk.nodes);assert.equal(nodes.filter(node=>node.tag==='rect').length,3000);assert.ok(nodes.some(node=>node.text==='Weekly Retention'));
  await viewer.evaluate(async chunks=>{const {Mirror}=await import('/web/mirror.js');const mirror=new Mirror(document.querySelector('#mirror').contentDocument,{resolve:value=>value});for(const chunk of chunks)mirror.apply(chunk);},chunks);
  const actual=viewer.frameLocator('#mirror');assert.equal(await actual.locator('#chart rect').count(),3000);assert.equal(await actual.locator('#chart-label').textContent(),'Weekly Retention');
+ const viewport=await actual.locator('html').evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));assert.ok(viewport.scrollWidth<=1000,'mirror should not add a horizontal scrollbar');
  const geometry=async locator=>locator.evaluate(node=>{const r=node.getBBox(),s=getComputedStyle(node);return{x:r.x,y:r.y,width:r.width,height:r.height,fill:s.fill,fontSize:s.fontSize};});
  assert.deepEqual(await geometry(actual.locator('#chart-label')),await geometry(source.locator('#chart-label')));
  assert.equal(await actual.locator('#after').textContent(),'All chart content loaded');

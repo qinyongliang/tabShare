@@ -34,9 +34,20 @@ export class Mirror {
       }
     }
     for(const id of this.topLayers){const state=this.states.get(id);const n=this.nodes.get(id);if(n?.isConnected&&n.nodeType===1){if(n.tagName==='DIALOG'&&typeof state.modal==='boolean'){if(state.modal&&!n.matches(':modal')){n.removeAttribute('open');try{n.showModal();}catch{}}else if(!state.modal&&n.matches(':modal'))n.close();}if(typeof state.popoverOpen==='boolean')try{if(state.popoverOpen&&!n.matches(':popover-open'))n.showPopover();else if(!state.popoverOpen&&n.matches(':popover-open'))n.hidePopover();}catch{}}}
+    this.viewport(delta.meta);
     this.meta = delta.meta;this.sequence=delta.sequence;
     if(typeof delta.meta?.title==='string')this.doc.title=delta.meta.title;
     return true;
+  }
+  viewport(meta) {
+    const width=meta?.scrollbarWidth,height=meta?.scrollbarHeight;
+    if(![width,height].every(value=>Number.isFinite(value)&&value>=0&&value<=64)||!this.doc.defaultView.CSS.supports('selector(::-webkit-scrollbar)'))return;
+    let style=this.doc.getElementById('ts-viewport-css');
+    if(!style){style=this.doc.createElement('style');style.id='ts-viewport-css';this.doc.head.append(style);}
+    // Preserve the source's usable CSS viewport even across OS/DPR scrollbar
+    // differences. This changes only viewport gutter size, not page scrolling.
+    const css=':root{scrollbar-width:auto!important}:root::-webkit-scrollbar{width:'+width+'px!important;height:'+height+'px!important}';
+    if(style.textContent!==css)style.textContent=css;
   }
   properties(node, data,remember=true) {
     if (!node) return;

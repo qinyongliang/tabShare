@@ -76,3 +76,11 @@ test('stale parallel reads cannot repopulate a reset document',async()=>{
  await new Promise(resolve=>setImmediate(resolve));bridge.reset();release();await job;
  assert.equal(deliveries,0);assert.equal(bridge.done.size,0);assert.equal(bridge.bytesRetained,0);bridge.dispose();
 });
+
+test('prepared resources dispatch beyond four concurrent transfers without waiting for slow peers',async()=>{
+ const bridge=new ResourceBridge(async()=>{},async()=>{});bridge.scan=async()=>{};
+ for(let i=0;i<12;i++)bridge.done.set('doc_'+i,{bytes:new Uint8Array(1024),mime:'image/png',sent:new Set()});
+ const releases=[];let started=0;
+ const job=bridge.transfer(Array.from({length:12},(_,i)=>({id:'doc_'+i})),['viewer'],{deliver:async()=>{started++;await new Promise(resolve=>releases.push(resolve));return false;}});
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(started,12);releases.forEach(resolve=>resolve());await job;bridge.dispose();
+});

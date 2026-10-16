@@ -166,9 +166,9 @@ function sharedViewport(viewport){
   $('viewport-note').textContent=viewport?viewport.owner===viewerId?'共享视口跟随我的窗口，其他访客共用此布局。':'共享视口已由另一位访客调整；勾选可切换为我的窗口。':'此项会调整源网页布局，所有访客共同使用。';
 }
 function fit(){
+  $('stage').dataset.pan=String(['width','actual','custom'].includes(display.mode));
   const available=availableSize();
   layout=displayLayout(mirror?.meta,available,display.mode,display.zoom);if(!layout)return;
-  $('stage').dataset.pan=String(['width','actual','custom'].includes(display.mode));
   const {width,height}=mirror.meta;
   frame.style.width=width+'px';frame.style.height=height+'px';frame.style.transform='scale('+layout.scale+')';frame.style.transformOrigin='top left';
   $('fallback').style.width=video.style.width=layout.width+'px';$('fallback').style.height=video.style.height=layout.height+'px';

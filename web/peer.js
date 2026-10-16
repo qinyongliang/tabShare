@@ -1,6 +1,8 @@
 // Bounded, ordered SCTP streams. Keep this file identical in the extension and viewer.
 const CHUNK=16*1024,LIMIT=12*1024*1024,QUEUE=24*1024*1024;
 let outstanding=0;
+const assetBudgetWaiters=new Set();
+const wakeAssetBudget=()=>{for(const wake of [...assetBudgetWaiters])wake();};
 async function streamBytes(stream,limit){
   const reader=stream.getReader(),chunks=[];let size=0;
   try{for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>limit)throw Error('Expanded packet exceeds budget');chunks.push(value);}}
@@ -43,7 +45,7 @@ export class PeerLink {
   }
   channel(c){
     if(!['state','input','assets'].includes(c.label)||this.channels.has(c.label)){c.close();return;}
-    const entry={c,tail:Promise.resolve(),decode:Promise.resolve(),parts:new Map(),retained:0};this.channels.set(c.label,entry);c.binaryType='arraybuffer';c.bufferedAmountLowThreshold=65536;
+    const entry={c,tail:Promise.resolve(),decode:Promise.resolve(),parts:new Map(),retained:0,assets:[],pumping:false};this.channels.set(c.label,entry);c.binaryType='arraybuffer';c.bufferedAmountLowThreshold=c.label==='assets'?16384:65536;
     c.onopen=()=>{if(this.ready||this.channels.size!==3||![...this.channels.values()].every(e=>e.c.readyState==='open'))return;
       clearTimeout(this.timeout);this.ready=true;
       if(this.host)this.policyTimer=setInterval(()=>void this.sampleNetwork(),5000);
@@ -57,7 +59,7 @@ export class PeerLink {
         const view=new DataView(e.data),id=view.getUint32(0),total=view.getUint32(4),offset=view.getUint32(8),payload=new Uint8Array(e.data,12),limit=c.label==='input'?16384:this.host&&c.label==='assets'?4*1024*1024+4101:LIMIT;
         if(total<1||total>limit||offset+payload.length>total)throw Error('Invalid size');
         let part=entry.parts.get(id);
-        if(!part){if(offset!==0||entry.parts.size>=4||entry.retained+total>QUEUE)throw Error('Receive budget');part={bytes:new Uint8Array(total),next:0,timer:setTimeout(()=>this.close(),c.label==='assets'?120000:30000)};entry.parts.set(id,part);entry.retained+=total;}
+        if(!part){if(offset!==0||entry.parts.size>=(c.label==='assets'?1024:4)||entry.retained+total>QUEUE)throw Error('Receive budget');part={bytes:new Uint8Array(total),next:0,timer:setTimeout(()=>this.close(),c.label==='assets'?120000:30000)};entry.parts.set(id,part);entry.retained+=total;}
         if(offset!==part.next||part.bytes.length!==total)throw Error('Out of order');part.bytes.set(payload,offset);part.next+=payload.length;this.stats.received+=e.data.byteLength;
         if(part.next===total){
           clearTimeout(part.timer);entry.parts.delete(id);
@@ -89,17 +91,67 @@ export class PeerLink {
     }catch(error){console.warn('TabShare RTC negotiation:',error.message);this.close();}
   }
   send(m,channel='state'){const json=new TextEncoder().encode(JSON.stringify(m)),bytes=new Uint8Array(json.length+1);bytes[0]=1;bytes.set(json,1);return this.bytes(bytes,channel);}
-  sendAsset(meta,data){const json=new TextEncoder().encode(JSON.stringify(meta)),bytes=new Uint8Array(data.length+json.length+5);bytes[0]=2;new DataView(bytes.buffer).setUint32(1,json.length);bytes.set(json,5);bytes.set(data,5+json.length);return this.bytes(bytes,'assets');}
+  sendAsset(meta,data){
+    const json=new TextEncoder().encode(JSON.stringify(meta));if(json.length>4096)return Promise.resolve(false);
+    const prefix=new Uint8Array(json.length+5);prefix[0]=2;new DataView(prefix.buffer).setUint32(1,json.length);prefix.set(json,5);
+    // Keep one shared payload reference; do not copy an entire image per viewer.
+    return this.assetBytes(prefix,data);
+  }
+  reserveAsset(size){
+    return new Promise(resolve=>{
+      const wake=()=>{
+        if(this.closed||!this.ready){assetBudgetWaiters.delete(wake);resolve(false);return;}
+        // Memory admission, not a request-count or bandwidth limit. Leave room
+        // for input/state so images cannot evict interactive traffic.
+        if(this.queued+size>QUEUE/2||outstanding+size>48*1024*1024)return;
+        assetBudgetWaiters.delete(wake);this.queued+=size;outstanding+=size;resolve(true);
+      };
+      assetBudgetWaiters.add(wake);wake();
+    });
+  }
+  async assetBytes(prefix,data){
+    const entry=this.channels.get('assets'),size=prefix.length+data.length;
+    if(!this.ready||!entry||size<1||size>LIMIT||!await this.reserveAsset(size))return false;
+    return new Promise(resolve=>{
+      const job={prefix,data,size,id:++this.serial,offset:0,resolve,done:false};
+      if(this.closed){this.finishAsset(job,false);return;}
+      entry.assets.push(job);void this.pumpAssets(entry);
+    });
+  }
+  finishAsset(job,ok){
+    if(job.done)return;job.done=true;this.queued-=job.size;outstanding-=job.size;
+    job.prefix=job.data=null;job.resolve(ok);wakeAssetBudget();
+  }
+  async pumpAssets(entry){
+    if(entry.pumping)return;entry.pumping=true;let turns=0;
+    try{
+      while(entry.assets.length&&!this.closed){
+        if(!await this.drained(entry)||this.closed)break;
+        const job=entry.assets.shift(),count=Math.min(CHUNK,job.size-job.offset),packet=new Uint8Array(count+12),header=new DataView(packet.buffer);
+        header.setUint32(0,job.id);header.setUint32(4,job.size);header.setUint32(8,job.offset);
+        let copied=0;
+        if(job.offset<job.prefix.length){copied=Math.min(count,job.prefix.length-job.offset);packet.set(job.prefix.subarray(job.offset,job.offset+copied),12);}
+        if(copied<count){const start=Math.max(0,job.offset-job.prefix.length);packet.set(job.data.subarray(start,start+count-copied),12+copied);}
+        // Put the current job back before a send that could fail/close the peer.
+        entry.assets.push(job);entry.c.send(packet);this.stats.sent+=packet.length;job.offset+=count;
+        if(job.offset===job.size){entry.assets.splice(entry.assets.indexOf(job),1);this.finishAsset(job,true);}
+        // Yield to input/DOM events without imposing any per-byte rate sleep.
+        if(++turns%16===0)await new Promise(resolve=>setTimeout(resolve,0));
+      }
+    }catch{this.close();}
+    finally{entry.pumping=false;if(this.closed)for(const job of entry.assets.splice(0))this.finishAsset(job,false);}
+  }
   drained(entry){
-    if(this.closed)return Promise.resolve(false);if(entry.c.bufferedAmount<=256*1024)return Promise.resolve(true);
+    if(this.closed)return Promise.resolve(false);const high=entry.c.label==='assets'?65536:262144,lowMark=entry.c.label==='assets'?16384:65536;if(entry.c.bufferedAmount<=high)return Promise.resolve(true);
     return new Promise(resolve=>{
       const done=ok=>{clearTimeout(timer);entry.c.removeEventListener('bufferedamountlow',low);entry.c.removeEventListener('close',closed);this.waiters.delete(done);resolve(ok);};
-      const low=()=>{if(entry.c.bufferedAmount<=65536)done(true);},closed=()=>done(false);
+      const low=()=>{if(entry.c.bufferedAmount<=lowMark)done(true);},closed=()=>done(false);
       const timer=setTimeout(()=>{done(false);this.close();},10000);this.waiters.add(done);
       entry.c.addEventListener('bufferedamountlow',low);entry.c.addEventListener('close',closed);if(this.closed)closed();else low();
     });
   }
   bytes(bytes,name){
+    if(name==='assets')return this.assetBytes(new Uint8Array(),bytes);
     const entry=this.channels.get(name);if(!this.ready||!entry||bytes.length>LIMIT)return Promise.resolve(false);
     if(this.queued+bytes.length>QUEUE||outstanding+bytes.length>64*1024*1024){this.close();return Promise.resolve(false);}this.queued+=bytes.length;outstanding+=bytes.length;
     const retained=bytes.length,id=++this.serial;
@@ -111,7 +163,7 @@ export class PeerLink {
         if(!await this.drained(entry)||this.closed)return false;
         const count=Math.min(CHUNK,bytes.length-offset),packet=new Uint8Array(count+12),header=new DataView(packet.buffer);header.setUint32(0,id);header.setUint32(4,bytes.length);header.setUint32(8,offset);packet.set(bytes.subarray(offset,offset+count),12);entry.c.send(packet);this.stats.sent+=packet.length;
       }return true;
-    }).catch(()=>{this.close();return false;}).finally(()=>{this.queued-=retained;outstanding-=retained;});entry.tail=job;return job;
+    }).catch(()=>{this.close();return false;}).finally(()=>{this.queued-=retained;outstanding-=retained;wakeAssetBudget();});entry.tail=job;return job;
   }
   video(track){
     this.videoTail=(this.videoTail||Promise.resolve()).catch(()=>{}).then(async()=>{if(!this.sender||this.closed)return;await this.policyTask;await this.sender.replaceTrack(track);return this.updateVideoPolicy();});return this.videoTail;
@@ -151,7 +203,8 @@ export class PeerLink {
       // A closed channel can outlive the connection in browser event queues.
       // Drop partial receive buffers and detach closures immediately.
       e.c.onopen=e.c.onclose=e.c.onerror=e.c.onmessage=null;
+      for(const job of e.assets.splice(0))this.finishAsset(job,false);
       for(const p of e.parts.values()){clearTimeout(p.timer);e.retained-=p.bytes.length;}
       e.parts.clear();
-    }this.channels.clear();this.pc.close();this.state?.('down');}
+    }this.channels.clear();wakeAssetBudget();this.pc.close();this.state?.('down');}
 }

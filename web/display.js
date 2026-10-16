@@ -7,7 +7,11 @@ export function displayLayout(source,available,mode='fit',zoom=1) {
   if(!Number.isFinite(available.width)||!Number.isFinite(available.height)||available.width<=0||available.height<=0)return null;
   let scale=mode==='actual'?1:mode==='custom'?clamp(zoom,.25,2):mode==='width'?available.width/width:Math.min(available.width/width,available.height/height);
   scale=clamp(scale,.001,4);
-  return {scale,width:width*scale,height:height*scale,areaWidth:Math.max(available.width,width*scale),areaHeight:Math.max(available.height,height*scale)};
+  const fit=mode==='fit',scaledWidth=width*scale,scaledHeight=height*scale;
+  // Floating point multiplication can exceed an exact viewport edge by a tiny
+  // fraction, which CSS layout may round up into a one-pixel scrollbar.
+  return {scale,width:fit?Math.min(available.width,scaledWidth):scaledWidth,height:fit?Math.min(available.height,scaledHeight):scaledHeight,
+    areaWidth:fit?available.width:Math.max(available.width,scaledWidth),areaHeight:fit?available.height:Math.max(available.height,scaledHeight)};
 }
 
 export function sourcePoint(point,rect,source) {

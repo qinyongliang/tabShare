@@ -33,3 +33,11 @@ test('wheel line and page units become bounded CSS-pixel deltas',()=>{
   assert.deepEqual(wheelPixels({deltaX:2,deltaY:3,deltaMode:1},800),{deltaX:32,deltaY:48});
   assert.deepEqual(wheelPixels({deltaX:0,deltaY:2,deltaMode:2},800),{deltaX:0,deltaY:1600});
 });
+
+test('fit bounds remain exact across fractional client sizes and zoom ratios',()=>{
+ for(const source of [{width:1920,height:1080},{width:1536,height:864},{width:1365,height:767}])
+  for(const available of [{width:997.6,height:653.2},{width:853.333333,height:477.777777},{width:1001,height:701}]){
+   const fit=displayLayout(source,available,'fit');assert.ok(fit.width<=available.width);assert.ok(fit.height<=available.height);
+   assert.equal(fit.areaWidth,available.width);assert.equal(fit.areaHeight,available.height);
+  }
+});

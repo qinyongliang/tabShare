@@ -34,7 +34,7 @@ async function handle(m) {
   if(m.type==='asset'){
     const raw=atob(m.data),bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));
     const todo=[...m.viewerIds||[m.viewerId]],delivered=[];
-    await Promise.all(Array.from({length:Math.min(4,todo.length)},async()=>{while(todo.length){const viewerId=todo.shift(),p=peers.get(key({...m,viewerId}));if(p?.ready&&await p.sendAsset(m.meta,bytes))delivered.push(viewerId);}}));
+    await Promise.all(todo.map(async viewerId=>{const p=peers.get(key({...m,viewerId}));if(p?.ready&&await p.sendAsset(m.meta,bytes))delivered.push(viewerId);}));
     return delivered;
   }
   if(m.type==='bind')for(const p of peers.values())if(p.sessionId===m.sessionId){p.tabId=m.tabId;await p.video(captures.get(m.tabId)?.track||null);}

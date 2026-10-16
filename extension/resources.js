@@ -2,9 +2,9 @@
 export class ResourceBridge {
   constructor(command, evaluate) {
     this.command=command;this.evaluate=evaluate;this.loaded=new Map();this.responses=new Map();
-    this.done=new Map();this.reading=null;this.pendingTransfers=new Map();this.activeTransfers=new Map();this.controller=new AbortController();this.disposed=false;this.generation=0;this.bytesRetained=0;
+    this.done=new Map();this.reading=null;this.pendingTransfers=new Map();this.activeTransfers=new Map();this.controller=new AbortController();this.disposed=false;this.generation=0;this.bytesRetained=0;this.readBytes=0;this.readWaiters=new Set();
   }
-  reset() {this.generation++;this.loaded.clear();this.responses.clear();this.pendingTransfers.clear();this.activeTransfers.clear();this.done.clear();this.bytesRetained=0;}
+  reset() {this.generation++;this.loaded.clear();this.responses.clear();this.pendingTransfers.clear();this.activeTransfers.clear();this.done.clear();this.bytesRetained=0;for(const wake of [...this.readWaiters])wake();}
   event(method,p) {
     if(method==='Network.responseReceived'&&p.response?.url){if(this.responses.size>=512)this.responses.delete(this.responses.keys().next().value);this.responses.set(p.response.url,{id:p.requestId,mime:p.response.mimeType,frameId:p.frameId});if(p.type==='Font')void this.evaluate('globalThis.__tabShareDOM?.loadedResources('+JSON.stringify([p.response.url])+')').catch(()=>{});}
   }
@@ -74,27 +74,41 @@ export class ResourceBridge {
     this.reading=this.drain().finally(()=>{this.reading=null;if(this.pendingTransfers.size&&!this.disposed)return this.transfer([],[],{});});
     return this.reading;
   }
+  async reserveRead(request,generation){
+    // CDP returns whole bodies. Reserve the worst-case body size before reading
+    // unknown resources; known data URLs need only their own bounded size.
+    const size=request.url?.startsWith('data:')?Math.min(8*1024*1024,request.url.length):8*1024*1024;
+    return new Promise(resolve=>{
+      const wake=()=>{
+        if(this.disposed||generation!==this.generation){this.readWaiters.delete(wake);resolve(null);return;}
+        if(this.readBytes+size>32*1024*1024)return;
+        this.readWaiters.delete(wake);this.readBytes+=size;
+        resolve(()=>{this.readBytes-=size;for(const next of [...this.readWaiters])next();});
+      };this.readWaiters.add(wake);wake();
+    });
+  }
   async drain() {
     const generation=this.generation;
     await this.scan(false).catch(()=>{});
-    const worker=async()=>{
-      while(this.pendingTransfers.size&&!this.disposed&&generation===this.generation){
-        // Fonts unblock text/layout. Keep other assets in insertion order.
+    const running=new Set();
+    while((this.pendingTransfers.size||running.size)&&!this.disposed&&generation===this.generation){
+      while(this.pendingTransfers.size){
         const entry=[...this.pendingTransfers].find(([,job])=>job.request.kind==='font')||this.pendingTransfers.entries().next().value;
         const [key,job]=entry;this.pendingTransfers.delete(key);this.activeTransfers.set(key,job);
-        try{await this.deliver(job,generation);}
-        finally{if(this.activeTransfers.get(key)===job)this.activeTransfers.delete(key);}
+        const task=this.deliver(job,generation).finally(()=>{running.delete(task);if(this.activeTransfers.get(key)===job)this.activeTransfers.delete(key);});
+        running.add(task);
       }
-    };
-    // Bound simultaneous reads/uploads and rely on each transport's actual
-    // bufferedAmount / HTTP completion for backpressure, not a fixed sleep per byte.
-    await Promise.all(Array.from({length:4},worker));
+      if(running.size)await Promise.race(running);
+    }
+    await Promise.all(running);
   }
   async deliver({request,sessions,config},generation) {
     try {
       let item=this.done.get(request.id);
       if(!item){
-        const body=await this.read(request.url),bytes=this.bytes(body);
+        const release=await this.reserveRead(request,generation);if(!release)return;
+        let body,bytes;
+        try{body=await this.read(request.url);bytes=this.bytes(body);}finally{release();}
         if(this.disposed||generation!==this.generation)return;
         if(!bytes.length||bytes.length>8*1024*1024||this.bytesRetained+bytes.length>32*1024*1024)throw new Error('Resource budget exceeded');
         let mime=this.loaded.get(request.url)?.mime||this.responses.get(request.url)?.mime||body.mime;

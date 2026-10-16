@@ -1,6 +1,7 @@
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#23304a;background:#f4f6fb;font-size:14px}*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}.mark{display:inline-grid;place-items:center;width:34px;height:34px;background:#335fea;color:white;border-radius:10px;font-weight:800;letter-spacing:-1px}.brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:750;letter-spacing:-.5px;text-decoration:none;color:inherit}.landing{max-width:850px;margin:0 auto;padding:65px 30px}.eyebrow{display:block;margin-top:70px;font-size:13px;color:#335fea;font-weight:650;letter-spacing:2px}.landing h1{font-size:clamp(36px,6vw,62px);line-height:1.16;letter-spacing:-2px;margin:18px 0 26px}.landing p{max-width:640px;font-size:18px;line-height:1.75;color:#63718a}.landing ol{padding-left:22px;line-height:2.2;margin-top:30px}.landing aside{margin-top:34px;border-left:3px solid #94a9e5;padding-left:16px;color:#64718a}
 button{border:1px solid #dce3ee;color:#405475;background:white;padding:8px 11px;border-radius:8px;cursor:pointer}button:hover{background:#edf2ff}
-.viewer{height:100dvh;min-width:0;overflow:hidden;background:white}
+.viewer-root{width:100%;height:100%;overflow:hidden;overscroll-behavior:none}
+.viewer{position:fixed;inset:0;width:100%;height:100%;min-width:0;overflow:hidden;background:white}
 #stage{position:fixed;inset:0;min-width:0;min-height:0;overflow:hidden;overscroll-behavior:contain;background:white}
 #stage[data-pan=true]{overflow:auto}
 #display-area{display:block}#surface{position:relative;overflow:hidden;flex-shrink:0;background:white;touch-action:auto}
@@ -27,10 +28,10 @@ button{border:1px solid #dce3ee;color:#405475;background:white;padding:8px 11px;
 #location-requests button{margin:4px;padding:8px 12px}
 
 /* Loading and interaction feedback lives in the trusted viewer, not source scripts. */
-#sync-feedback{position:fixed;z-index:1001;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:9px;padding:9px 14px;max-width:calc(100vw - 24px);border:1px solid #dae3f2;border-radius:24px;background:#fffffff5;color:#405475;box-shadow:0 3px 16px #15243d18;pointer-events:none;font-size:13px}
+#sync-feedback{position:fixed;z-index:1001;top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;padding:10px;max-width:calc(100vw - 24px);border:1px solid #dae3f2;border-radius:24px;background:#fffffff5;color:#405475;box-shadow:0 3px 16px #15243d18;pointer-events:none;font-size:13px}
 #sync-feedback[hidden]{display:none}.sync-spinner{display:inline-block;flex-shrink:0;width:18px;height:18px;border:2px solid #dbe4fa;border-top-color:#335fea;border-radius:50%;animation:ts-spin .75s linear infinite}
-#sync-feedback[data-busy=false] .sync-spinner{display:none}
+#sync-feedback[data-error=true] .sync-spinner{border-top-color:#cb4556}
 :root[data-initial-sync=true] #display-area{visibility:hidden}
-:root[data-initial-sync=true] #stage::after{content:'正在同步共享页面';position:absolute;top:42%;left:0;right:0;text-align:center;color:#708099;font-size:15px}
+:root[data-initial-sync=true] #stage::after{content:'';position:absolute;top:42%;left:calc(50% - 16px);width:28px;height:28px;border:3px solid #dbe4fa;border-top-color:#335fea;border-radius:50%;animation:ts-spin .75s linear infinite;pointer-events:none}
 @keyframes ts-spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.sync-spinner{animation:none;border-style:dotted}}
+@media(prefers-reduced-motion:reduce){.sync-spinner,:root[data-initial-sync=true] #stage::after{animation:none;border-style:dotted}}

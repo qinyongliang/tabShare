@@ -199,7 +199,7 @@ function bootstrap(draggable,caretPosition,selectionState,BlobDownloads) {
       for(const node of controls){if(!node.isConnected){controls.delete(node);continue;}const old=previous.get(ids.get(node));const value=node.type==='password'?'':String(node.value).slice(0,262144);if(old&&(old.value!==value||old.checked!==!!node.checked||old.selectedIndex!==(node.selectedIndex??null))){mark(node);checkControl(node);}}
     }
     refreshState();
-    const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio,contextMenu,caret:caretPosition(document,node=>closedRoots.get(node),widgetRoot),selection:selectionState(document,node=>closedRoots.get(node)),loading:document.readyState!=='complete',pending:dirty.size>0};
+    const meta={width:innerWidth,height:innerHeight,scrollbarWidth:Math.max(0,innerWidth-document.documentElement.clientWidth),scrollbarHeight:Math.max(0,innerHeight-document.documentElement.clientHeight),scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio,contextMenu,caret:caretPosition(document,node=>closedRoots.get(node),widgetRoot),selection:selectionState(document,node=>closedRoots.get(node)),loading:document.readyState!=='complete',pending:dirty.size>0};
     const hadWork=dirty.size>0, fresh=[],updates=[],removes=[];
     let count=0,packetBytes=0;const started=performance.now();
     // Shallow nodes make capture resumable: expensive trees never monopolize the tab.

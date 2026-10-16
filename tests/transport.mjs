@@ -64,7 +64,7 @@ try{
    async function add(index){
      const attempt=crypto.randomUUID(),p={index,state:new DocumentState(),inputs:0,last:0,asset:false,downs:0};
      const video=document.createElement('video');video.muted=true;video.playsInline=true;video.style.cssText='width:100px;height:60px';document.body.append(video);p.video=video;
-     p.guest=new PeerLink({attempt,iceServers:index===0?weak:ice[index],signal:s=>void p.host.accept(s),track:stream=>{video.srcObject=stream;void video.play();},message:m=>{if(m.type==='dom'){try{const d=m.document;if(!d.reset&&(d.version!==p.state.version||d.sequence<=p.last))throw Error('unordered state');p.state.apply(d);p.last=d.sequence;if(p.state.nodes.get('1')?.text!==String(p.last))throw Error('lost delta');}catch{p.failed=true;}}},asset:(meta,bytes)=>{p.asset=bytes.length===262144&&bytes[0]===0&&bytes[bytes.length-1]===255;},state:s=>{if(s==='down')p.downs++;}});
+     p.guest=new PeerLink({attempt,iceServers:index===0?weak:ice[index],signal:s=>void p.host.accept(s),track:stream=>{video.srcObject=stream;void video.play();},message:m=>{if(m.type==='dom'){try{const d=m.document;if(!d.reset&&(d.version!==p.state.version||d.sequence<=p.last))throw Error('unordered state');p.state.apply(d);p.last=d.sequence;if(p.state.nodes.get('1')?.text!==String(p.last))throw Error('lost delta');}catch{p.failed=true;}}},asset:(meta,bytes)=>{(p.assetOrder??=[]).push(meta.id);if(meta.id==='load_0')p.asset=bytes.length===262144&&bytes[0]===0&&bytes[bytes.length-1]===255;},state:s=>{if(s==='down')p.downs++;}});
      p.host=new PeerLink({host:true,attempt,iceServers:ice[index],signal:s=>void p.guest.accept(s),message:m=>{if(m.type==='input')p.inputs++;}});
      for(const link of [p.host,p.guest]){
        // Relay-only is the same deterministic TURN/TCP test configuration used
@@ -77,7 +77,7 @@ try{
      grow:async n=>{const start=pairs.length;await Promise.all(Array.from({length:n-start},(_,j)=>add(start+j)));},
      seed:()=>{for(const p of pairs)void p.host.send({type:'dom',document:snapshot()});},
      tick:()=>{sequence++;for(const p of pairs){void p.host.send({type:'dom',document:{version:'load',sequence,root:'1',updates:[{id:'1',changes:{text:String(sequence)}}],meta:{width:640,height:360}}});void p.guest.send({type:'input',input:{action:'text',text:'tick'}},'input');}},
-     weakAsset:()=>{const bytes=Uint8Array.from({length:262144},(_,i)=>i%256);void pairs[0].host.sendAsset({id:'load_0',size:bytes.length,mime:'image/png'},bytes);},
+     weakAsset:()=>{const bytes=Uint8Array.from({length:262144},(_,i)=>i%256);void pairs[0].host.sendAsset({id:'load_0',size:bytes.length,mime:'image/png'},bytes);for(let i=0;i<12;i++)void pairs[0].host.sendAsset({id:'icon_'+i,size:1024,mime:'image/png'},new Uint8Array(1024));},
      mode:full=>capture.setLayout(videoLayout({...capture.layout,full})),
      replace:async index=>{const p=pairs[index];p.host.close();p.guest.close();p.video.remove();await add(index);},
      report:()=>({sequence,peers:pairs.map(p=>({ready:p.host.ready&&p.guest.ready,last:p.last,inputs:p.inputs,failed:!!p.failed,downs:p.downs,asset:p.asset,queued:p.host.queued+p.guest.queued,frames:p.video.getVideoPlaybackQuality().totalVideoFrames,video:p.host.stats.video,encoding:p.host.sender.getParameters().encodings?.[0]}))}),
@@ -112,6 +112,7 @@ try{
    await delay(200);
  }
  await until(()=>page.evaluate(()=>{const r=loadCheck.report();return r.peers.every(p=>p.ready&&p.last===r.sequence&&p.inputs>0&&p.frames>1&&p.video?.frames>0)&&r.peers[0].asset;}),'all peers catch up after shaped traffic',30000);
+ const assetOrder=await page.evaluate(()=>loadCheck.pairs[0].assetOrder);assert.equal(assetOrder.filter(id=>id.startsWith('icon_')).length,12);assert.ok(assetOrder.indexOf('icon_11')<assetOrder.indexOf('load_0'),'small P2P assets bypass a large asset through fragment interleaving');
  const result=await page.evaluate(()=>loadCheck.report());
  assert.ok(result.peers.every(p=>p.video&&p.video.frames>0),'actual RTP stats are sampled');
  await page.evaluate(()=>loadCheck.stop());
