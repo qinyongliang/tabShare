@@ -11,7 +11,7 @@ const server=http.createServer(async(req,res)=>{
   const path=req.url.split('?')[0];
   res.setHeader('Content-Security-Policy',path==='/mirror.html'?mirrorCSP:shell);
   if(path.startsWith('/web/')&&/^[a-z-]+\.(js|css)$/.test(path.slice(5))){res.setHeader('Content-Type',path.endsWith('.js')?'text/javascript':'text/css');res.end(await readFile(new URL('..'+path,import.meta.url)));return;}
-  if(path==='/feedback-fixture.css'){res.setHeader('Content-Type','text/css');res.end('#display-area{position:relative;margin-top:30px;width:1000px;height:800px}#mirror{position:relative;width:1000px;height:800px}');return;}
+  if(path==='/feedback-fixture.css'){res.setHeader('Content-Type','text/css');res.end('#display-area{position:relative;margin-top:30px;width:1000px;height:800px;overflow:hidden}#mirror{position:relative;width:1000px;height:800px}');return;}
   if(path==='/fixture.css'){res.setHeader('Content-Type','text/css');res.end('body{margin:0;color:#17233a;font:16px sans-serif}svg{display:block}');return;}
   res.setHeader('Content-Type','text/html; charset=utf-8');
   if(path==='/source'){res.end(sourceHTML);return;}
@@ -55,9 +55,10 @@ try{
  do{chunk=await source.evaluate(()=>__tabShareDOM.capture());if(chunk)chunks.push(chunk);}while(chunk?.meta.pending&&chunks.length<500);
  assert.equal(chunk.meta.pending,false);assert.equal(chunk.meta.truncated,false);
  const nodes=chunks.flatMap(chunk=>chunk.nodes);assert.equal(nodes.filter(node=>node.tag==='rect').length,3000);assert.ok(nodes.some(node=>node.text==='Weekly Retention'));
- await viewer.evaluate(async chunks=>{const {Mirror}=await import('/web/mirror.js');const mirror=new Mirror(document.querySelector('#mirror').contentDocument,{resolve:value=>value});for(const chunk of chunks)mirror.apply(chunk);},chunks);
+ await viewer.evaluate(async chunks=>{const {Mirror}=await import('/web/mirror.js');const frame=document.querySelector('#mirror'),meta=chunks[0].meta;frame.style.width=meta.width+'px';frame.style.height=meta.height+'px';frame.style.transform='scale('+(1000/meta.width)+')';const mirror=new Mirror(frame.contentDocument,{resolve:value=>value});for(const chunk of chunks)mirror.apply(chunk);},chunks);
  const actual=viewer.frameLocator('#mirror');assert.equal(await actual.locator('#chart rect').count(),3000);assert.equal(await actual.locator('#chart-label').textContent(),'Weekly Retention');
- const viewport=await actual.locator('html').evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));assert.ok(viewport.scrollWidth<=1000,'mirror should not add a horizontal scrollbar');
+ const viewportOf=locator=>locator.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
+ const viewport=await viewportOf(actual.locator('html')),sourceViewport=await viewportOf(source.locator('html'));assert.deepEqual(viewport,sourceViewport,'mirror keeps the source CSS viewport; fit is applied outside the iframe');
  const geometry=async locator=>locator.evaluate(node=>{const r=node.getBBox(),s=getComputedStyle(node);return{x:r.x,y:r.y,width:r.width,height:r.height,fill:s.fill,fontSize:s.fontSize};});
  assert.deepEqual(await geometry(actual.locator('#chart-label')),await geometry(source.locator('#chart-label')));
  assert.equal(await actual.locator('#after').textContent(),'All chart content loaded');
