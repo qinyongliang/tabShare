@@ -9,7 +9,7 @@ const font=await readFile(process.env.TEST_FONT_PATH||'/usr/share/fonts/truetype
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jgH8AAAAASUVORK5CYII=','base64');
 const hits=[];
 const server=http.createServer(async(req,res)=>{
- if(['/extension/video-capture.js','/extension/video-layout.js'].includes(req.url)){res.setHeader('Content-Type','text/javascript');res.end(await readFile(new URL('..'+req.url,import.meta.url)));return;}
+ if(['/extension/video-capture.js','/extension/video-layout.js','/web/remote-input.js','/web/clipboard.js'].includes(req.url)){res.setHeader('Content-Type','text/javascript');res.end(await readFile(new URL('..'+req.url,import.meta.url)));return;}
  hits.push(req.url);
  if(req.url==='/font.ttf'){res.setHeader('Content-Type','font/ttf');res.end(font);return;}
  if(req.url==='/icons'){res.setHeader('Content-Type','text/html');res.end(await readFile(new URL('./fixtures/icons.html',import.meta.url)));return;}
@@ -140,7 +140,7 @@ try{
 
  const caret=await source.evaluate(()=>{const input=document.createElement('input');input.style.cssText='position:fixed;left:120px;top:80px;width:300px;height:40px;padding:4px;border:1px solid;font:20px monospace';input.value='abcdef';document.body.append(input);input.focus();input.setSelectionRange(0,0);const a=__tabShareDOM.capture().meta.caret;input.setSelectionRange(3,3);const b=__tabShareDOM.capture().meta.caret;const c=document.createElement('canvas').getContext('2d');c.font=getComputedStyle(input).font;const advance=c.measureText('abc').width;input.setSelectionRange(1,4);const selection=__tabShareDOM.capture().meta.selection;return {a,b,advance,selection};});
  assert.ok(Math.abs(caret.b.x-caret.a.x-caret.advance)<1,'input caret tracks the insertion position');assert.ok(caret.b.y>=80&&caret.b.y<120);assert.equal(caret.selection.text,'bcd');
- await visitor.evaluate((await readFile(new URL('../web/remote-input.js',import.meta.url),'utf8')).replace('export class RemoteInput','globalThis.ReviewRemoteInput=class RemoteInput'));
+ await visitor.evaluate(async()=>{globalThis.ReviewRemoteInput=(await import('/web/remote-input.js')).RemoteInput;});
  await visitor.addStyleTag({content:await readFile(new URL('../web/style.css',import.meta.url),'utf8')});
  const ime=await visitor.evaluate(()=>{const frame=document.createElement('iframe');frame.style.cssText='position:fixed;left:40px;top:60px;width:600px;height:300px;border:0;transform:scale(.5);transform-origin:top left';document.body.append(frame);const sent=[],remote=new ReviewRemoteInput(document,frame,m=>sent.push(m),()=>{});remote.activate(100,100);remote.update({caret:{x:120,y:80,height:24,fontSize:20}});const r=remote.box.getBoundingClientRect();remote.box.dispatchEvent(new CompositionEvent('compositionstart'));remote.box.dispatchEvent(new CompositionEvent('compositionend',{data:'中文'}));remote.box.dispatchEvent(new InputEvent('beforeinput',{data:'中文',inputType:'insertFromComposition',cancelable:true}));remote.release();return {x:r.x,y:r.y,height:r.height,sent,hidden:remote.box.hidden};});
  assert.ok(Math.abs(ime.x-100)<1&&Math.abs(ime.y-100)<1&&Math.abs(ime.height-12)<1,'IME proxy uses scaled viewport caret coordinates');assert.deepEqual(ime.sent,[{action:'text',text:'中文'}]);assert.equal(ime.hidden,true);
