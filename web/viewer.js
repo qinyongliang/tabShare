@@ -1,4 +1,5 @@
-import {pasteImage} from './clipboard.js';
+import {VisitorGeolocation} from './geolocation.js';
+import {pasteImage,textPastePackets,clipboardShortcut,selectedText} from './clipboard.js';
 import {contextMenu} from './context-menu.js';
 import {draggable} from './draggable.js';
 import {RemoteInput} from './remote-input.js';
@@ -17,7 +18,8 @@ const frame=$('mirror');
 let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTimer,lastRegionFrame;
 const video=document.getElementById('stream');
 const resources=new Resources(id,key,ids=>mirror?.refreshResources(ids));
-const downloads=new Downloads(document,text=>notify(text,true));
+let downloads=new Downloads(document,text=>notify(text,true));
+const visitorLocation=new VisitorGeolocation(document,message=>input(message));
 const popupWindows=new PopupWindows(document);
 let contextSeen=0,sourceMode='dom',activeDialog,viewerId,following=false,viewportTimer,lastViewport,queuedViewport,fitFrame,layout;
 let display={mode:'fit',zoom:1};
@@ -50,7 +52,7 @@ function send(m){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(m));}
 const navigation=new SharedNavigation(window,key,m=>input(m));
 function input(m){if(connected){if(m.nodeId||['text','keyDown','keyUp','mouseMoved','mouseLeave','mousePressed','mouseReleased','mouseWheel','scroll','select','selection'].includes(m.action))m={version:mirror?.version,...m};if(peerReady)void peer.send({type:'input',input:m},'input');else send({type:'input',input:m});}}
 const pageMenu=contextMenu(document,{navigate:url=>input({action:'navigate',url}),reload:()=>input({action:'reload'}),error:error=>notify(error.message,true)});
-const remoteInput=new RemoteInput(document,frame,m=>input(m),data=>{const image=[...data.files].find(f=>/^image\/(png|jpeg|gif|webp)$/.test(f.type));if(image)void pasteImage(image,{session:id,key,viewerId,peer:peerReady?peer:null,selection:{version:mirror.version,nodeId:''}}).catch(e=>notify(e.message,true));else input({action:'text',text:data.getData('text/plain').slice(0,8192)});});
+const remoteInput=new RemoteInput(document,frame,m=>input(m),data=>{const image=[...data.files].find(f=>/^image\/(png|jpeg|gif|webp)$/.test(f.type));if(image)void pasteImage(image,{session:id,key,viewerId,peer:peerReady?peer:null,selection:{version:mirror.version,nodeId:''}}).catch(e=>notify(e.message,true));else try{for(const packet of textPastePackets(data.getData('text/plain')))input(packet);}catch(e){notify(e.message,true);}});
 let regionalPointer,regionalActive=false;
 function resync(){if(peerReady)void peer.send({type:'resync'},'input');else send({type:'resync'});}
 function updateVideo(){
@@ -89,7 +91,7 @@ async function signaling(s){
   if(s.description?.type==='offer'&&s.attempt!==peer?.attempt){
     peer?.close();peerReady=false;route='WebRTC 协商中';
     const link=new PeerLink({attempt:s.attempt,iceServers:rtcServers,signal:value=>send({type:'signal',signal:value}),
-      message:(m,channel)=>{if(channel==='state')receive(m,true);},asset:(meta,bytes)=>{if(meta.kind==='download-chunk')downloadQueue=downloadQueue.then(()=>downloads.accept(meta,bytes)).catch(e=>notify(e.message,true));else void resources.add(meta,bytes);},
+      message:(m,channel)=>{if(channel==='state')receive(m,true);},asset:(meta,bytes)=>{if(meta.kind==='download-chunk')queueDownload(meta,bytes);else void resources.add(meta,bytes);},
       track:stream=>{video.srcObject=stream;void video.play().catch(()=>{});},
       state:status=>{if(peer!==link)return;peerReady=status==='up';if(peerReady){void link.route().then(value=>{route=value;notify('已连接 · '+route,true);});resync();sendProfile();}else{route='WebSocket 兜底';updateVideo();send({type:'resync'});}}
     });peer=link;
@@ -98,6 +100,12 @@ async function signaling(s){
 }
 let rtcServers=[],viewportOwner,lastProfile,viewportInitialized=false,autoViewport=false;
 let downloadQueue=Promise.resolve();
+function queueDownload(meta,bytes){const receiver=downloads;downloadQueue=downloadQueue.then(()=>acceptDownload(receiver,meta,bytes)).catch(error=>notify(error.message,true));}
+async function acceptDownload(receiver,meta,bytes){
+  try{const acknowledgement=await receiver.accept(meta,bytes);if(acknowledgement&&receiver===downloads&&!receiver.closed)input({action:'downloadAck',text:JSON.stringify(acknowledgement)});}
+  catch(error){if(receiver===downloads&&!receiver.closed&&meta?.id&&Number.isSafeInteger(meta.offset+bytes.length))input({action:'downloadAck',text:JSON.stringify({id:meta.id,offset:meta.offset+bytes.length,error:String(error.message||'无法保存下载').slice(0,200)})});notify(error.message,true);}
+}
+
 function sendProfile(){
   if(!peerReady||!peer)return;
   const box=$('surface').getBoundingClientRect(),dpr=window.devicePixelRatio||1;
@@ -106,6 +114,7 @@ function sendProfile(){
 }
 document.addEventListener('visibilitychange',sendProfile);
 function receive(m,direct=false){
+  if(m.type==='geolocation'){try{visitorLocation.receive(JSON.parse(m.data));}catch{}return;}
   if(!direct&&peerReady&&['dom','raster','resource','resources'].includes(m.type))return;
   if(m.type==='signal'){if(typeof RTCPeerConnection==='function')void signaling(m.signal).catch(()=>{route='WebSocket 兜底';});return;}
   if(m.type==='video'){videoInfo=m.info;full=false;frame.hidden=false;$('fallback').hidden=true;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();sendProfile();return;}
@@ -117,7 +126,7 @@ function receive(m,direct=false){
   if(m.type==='resource')void resources.add(m.asset);
   if(m.type==='resources')for(const asset of m.assets||[])void resources.add(asset);
   if(m.type==='notice')notify(m.detail||'操作未完成',true);
-  if(m.type==='download'){const bytes=Uint8Array.from(atob(m.download.data||''),c=>c.charCodeAt(0));downloadQueue=downloadQueue.then(()=>downloads.accept(m.download,bytes)).catch(e=>notify(e.message,true));}
+  if(m.type==='download'){const bytes=Uint8Array.from(atob(m.download.data||''),c=>c.charCodeAt(0));queueDownload(m.download,bytes);}
   if(m.type==='dialog')siteDialog(m.dialog);
   if(m.type==='popup')popupWindows.receive(m.popup);
   if(m.type==='dom')render(m.document);
@@ -170,7 +179,7 @@ function fit(){
 }
 function render(delta){
   if(!mirror){pending.push(delta);return;}
-  if(delta.reset&&delta.version!==mirror.version){resources.keepVersion(delta.version);remoteInput.release();regionalActive=false;regionalPointer=null;}
+  if(delta.reset&&delta.version!==mirror.version){if(mirror.version)visitorLocation.reset();resources.keepVersion(delta.version);remoteInput.release();regionalActive=false;regionalPointer=null;}
   const oldMeta=mirror.meta;
   if(!mirror.apply(delta)){resync();return;}
   connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;fit();
@@ -191,13 +200,13 @@ function connect(){
     receive(JSON.parse(event.data));
   };
   connection.onclose=event=>{
-    if(ws!==connection)return;peer?.close();peer=null;peerReady=false;video.srcObject=null;if(stopped)return;connected=false;
+    if(ws!==connection)return;visitorLocation.reset();void downloads.dispose();downloads=new Downloads(document,text=>notify(text,true));peer?.close();peer=null;peerReady=false;video.srcObject=null;if(stopped)return;connected=false;
     if(event.code===1008){stopped=true;if(new URLSearchParams(location.search).has('popup'))window.close();notify('分享已撤销，或链接密钥不正确');return;}
     notify('连接已断开，正在重连…');retry=setTimeout(connect,3000);
   };connection.onerror=()=>{};
 }
-$('retry').onclick=()=>{if(stopped){stopped=false;connect();}else if(ws?.readyState===WebSocket.OPEN)send({type:'retry'});else{clearTimeout(retry);const old=ws;ws=null;old?.close();connect();}};
-$('leave').onclick=()=>{stopped=true;connected=false;clearInterval(regionTimer);peer?.close();peer=null;peerReady=false;clearTimeout(retry);ws?.close();$('surface').hidden=true;$('display-area').hidden=true;$('empty').hidden=false;$('detail').textContent='已断开此访客。';notify('访问已断开');};
+$('retry').onclick=()=>{if(stopped){stopped=false;downloads=new Downloads(document,text=>notify(text,true));connect();}else if(ws?.readyState===WebSocket.OPEN)send({type:'retry'});else{clearTimeout(retry);const old=ws;ws=null;old?.close();connect();}};
+$('leave').onclick=()=>{visitorLocation.reset();void downloads.dispose();stopped=true;connected=false;clearInterval(regionTimer);peer?.close();peer=null;peerReady=false;clearTimeout(retry);ws?.close();$('surface').hidden=true;$('display-area').hidden=true;$('empty').hidden=false;$('detail').textContent='已断开此访客。';notify('访问已断开');};
 $('reload').onclick=()=>input({action:'reload'});
 $('navigation').onsubmit=e=>{e.preventDefault();try{const u=new URL($('address').value);if(!['http:','https:'].includes(u.protocol))throw new Error();input({action:'navigate',url:u.href});}catch{notify('请输入完整的 HTTP(S) 网址');}};
 let pointerForwarder;
@@ -233,25 +242,34 @@ function attach(){
   doc.addEventListener('keydown',e=>{
     if(browserHistoryKey(e)){e.preventDefault();history.go(['ArrowLeft','['].includes(e.key)?-1:1);return;}
     if(composing||e.isComposing||e.keyCode===229)return;
-    if((e.ctrlKey||e.metaKey)&&['c','v'].includes(e.key.toLowerCase()))return;
+    if(clipboardShortcut(e))return;
     if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;
     input({action:'keyDown',key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e),...selection(e.target)});
   },true);
-  doc.addEventListener('keyup',e=>{if(browserHistoryKey(e))return;if(composing||e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;input({action:'keyUp',key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});},true);
+  doc.addEventListener('keyup',e=>{if(browserHistoryKey(e)||clipboardShortcut(e))return;if(composing||e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;input({action:'keyUp',key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});},true);
   function pasteText(text,target){
-    text=text.slice(0,8192);if(!text)return;
-    const selected=selection(target);if(typeof target.setRangeText==='function'){target.setRangeText(text,target.selectionStart,target.selectionEnd,'end');mirror.localEdit(target);}input({action:'text',text,...selected});
+    if(!text)return;
+    const packets=textPastePackets(text,selection(target));
+    if(typeof target.setRangeText==='function'&&typeof target.selectionStart==='number'&&typeof target.selectionEnd==='number'){target.setRangeText(text,target.selectionStart,target.selectionEnd,'end');mirror.localEdit(target);}
+    for(const packet of packets)input(packet);
   }
   function pasteFile(file,target){
     const node=target.closest?.('[data-node-id]');
     return pasteImage(file,{session:id,key,viewerId,peer:peerReady?peer:null,selection:{...selection(target),nodeId:selection(target).nodeId||node?.dataset.nodeId,version:mirror.version}}).catch(error=>notify(error.message,true));
   }
   async function pasteClipboard(target){
+    if(!navigator.clipboard?.read){if(navigator.clipboard?.readText){pasteText(await navigator.clipboard.readText(),target);return;}throw Error('当前浏览器不支持剪贴板读取，请使用 Ctrl+V 或系统粘贴');}
     const entries=await navigator.clipboard.read();for(const entry of entries){const mime=entry.types.find(v=>/^image\/(png|jpeg|gif|webp)$/.test(v));if(mime){await pasteFile(new File([await entry.getType(mime)],'clipboard.'+mime.split('/')[1],{type:mime}),target);return;}if(entry.types.includes('text/plain')){pasteText(await (await entry.getType('text/plain')).text(),target);return;}}
   }
-  doc.addEventListener('paste',e=>{e.preventDefault();const image=[...e.clipboardData.files].find(file=>/^image\/(png|jpeg|gif|webp)$/.test(file.type));if(image){void pasteFile(image,e.target);return;}pasteText(e.clipboardData.getData('text/plain'),e.target);},true);
+  doc.addEventListener('paste',e=>{e.preventDefault();const image=[...e.clipboardData.files].find(file=>/^image\/(png|jpeg|gif|webp)$/.test(file.type));if(image){void pasteFile(image,e.target);return;}try{pasteText(e.clipboardData.getData('text/plain'),e.target);}catch(error){notify(error.message,true);}},true);
 
-  doc.addEventListener('cut',e=>{const selected=selection(e.target);if(selected.selection){input({action:'keyDown',key:'Backspace',code:'Backspace',keyCode:8,...selected});input({action:'keyUp',key:'Backspace',code:'Backspace',keyCode:8});}},true);
+  doc.addEventListener('cut',e=>{
+    const selected=selection(e.target),text=selectedText(doc,e.target);
+    if(!selected.selection||!text||e.target.readOnly||e.target.disabled)return;
+    e.preventDefault();e.clipboardData.setData('text/plain',text);
+    if(typeof e.target.setRangeText==='function'&&typeof e.target.selectionStart==='number'){e.target.setRangeText('',e.target.selectionStart,e.target.selectionEnd,'end');mirror.localEdit(e.target);}
+    input({action:'keyDown',key:'Backspace',code:'Backspace',keyCode:8,...selected});input({action:'keyUp',key:'Backspace',code:'Backspace',keyCode:8});
+  },true);
   doc.addEventListener('change',e=>{if(e.target.tagName==='SELECT')input({action:'select',nodeId:e.target.dataset.nodeId,text:e.target.value,values:[...e.target.selectedOptions].map(o=>o.value)});},true);
   doc.addEventListener('scroll',e=>{
     const root=e.target===doc;scrollNode=root?doc.scrollingElement:e.target;scrollRoot=root;clearTimeout(scrollTimer);
@@ -306,3 +324,5 @@ const pixelKeyboard=$('fallback-keyboard');
 pixelKeyboard.addEventListener('beforeinput',e=>{if(!e.isComposing&&e.data){e.preventDefault();input({action:'text',text:e.data});}});
 pixelKeyboard.addEventListener('compositionend',e=>{if(e.data)input({action:'text',text:e.data});pixelKeyboard.value='';});
 for(const [event,action] of [['keydown','keyDown'],['keyup','keyUp']])pixelKeyboard.addEventListener(event,e=>{if(e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;e.preventDefault();input({action,key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});});
+
+window.addEventListener('pagehide',()=>visitorLocation.reset());

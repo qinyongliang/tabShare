@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>tabShare 本地性能回归</title>
+<style>body{font:16px system-ui;margin:24px}iframe{width:45%;height:300px;border:1px solid #ccc}pre{white-space:pre-wrap}button{padding:10px}</style>
+<h1>tabShare 本地浏览器回归</h1><p>独立测试页面，不访问真实用户数据。</p><button id="run">运行回归</button><pre id="result">尚未运行</pre><iframe id="source"></iframe><iframe id="viewer"></iframe>
+<script type="module">
+import {Mirror} from '../web/mirror.js';
+import {installDOM} from '../extension/dom-capture.js';
+import {Resources} from '../web/resources.js';
+const result=document.querySelector('#result'),button=document.querySelector('#run');
+const assert=(value,message)=>{if(!value)throw Error(message);};
+button.onclick=async()=>{
+ button.disabled=true;result.textContent='运行中';const passed=[];
+ try{
+  const source=document.querySelector('#source').contentWindow,view=document.querySelector('#viewer').contentWindow;
+  source.document.body.innerHTML='<style>input{color:rgb(23,45,67);width:160px}.row{color:rgb(11,22,33)}</style><input id="field" value="initial"><section id="rows">'+Array.from({length:1000},(_,i)=>'<div class="row">row '+i+'</div>').join('')+'</section>';
+  source.eval(installDOM);const mirror=new Mirror(view.document,{resolve:v=>String(v)});let packet,batches=0,total=0;
+  do{packet=source.__tabShareDOM.capture();if(packet){mirror.apply(packet);total+=JSON.stringify(packet).length;}assert(++batches<500,'初始化未收敛');}while(packet?.meta.pending);
+  assert(view.document.querySelectorAll('.row').length===0,'class intentionally not transmitted');
+  assert(view.document.querySelector('#rows').children.length===1000,'初始1000行未完整同步');
+  assert(view.getComputedStyle(view.document.querySelector('#field')).color==='rgb(23, 45, 67)','初始样式不一致');
+  passed.push('PASS 1000行分批初始化、样式池化和镜像');
+  const target=source.document.querySelector('#field'),field=view.document.querySelector('#field');
+  field.focus();field.setSelectionRange(2,2);target.value='updated';target.dispatchEvent(new source.Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,0));
+  do{packet=source.__tabShareDOM.capture();if(packet)mirror.apply(packet);}while(packet?.meta.pending);
+  assert(field.value==='updated','输入值更新失败');assert(view.document.activeElement===field,'焦点丢失');assert(field.selectionStart===2,'光标位置丢失');
+  const id=field.dataset.nodeId,old=mirror.states.get(id),started=performance.now();
+  for(let i=0;i<10000;i++)mirror.properties(field,{id,value:'edit '+i});
+  const elapsed=performance.now()-started;assert(mirror.states.get(id).style===old.style,'稀疏更新复制样式');assert(field.value==='edit 9999','稀疏值丢失');
+  passed.push('PASS 10000次真实input patch复用样式；耗时 '+elapsed.toFixed(2)+'ms（非网络延迟）');
+  mirror.properties(field,{id,style:{color:'rgb(1, 2, 3)',width:null},attrs:{title:'temporary'}});
+  mirror.properties(field,{id,attrs:{title:null}});assert(!field.hasAttribute('title'),'属性删除失败');assert(!('width' in mirror.states.get(id).style),'缓存保留删除属性');assert(old.style.color==='rgb(23, 45, 67)','旧样式被修改');
+  passed.push('PASS 样式/属性删除、旧状态不变');
+  const rows=source.document.querySelector('#rows');rows.firstChild.remove();rows.append(rows.firstChild);await new Promise(r=>setTimeout(r,0));
+  do{packet=source.__tabShareDOM.capture();if(packet)mirror.apply(packet);}while(packet?.meta.pending);
+  assert(view.document.querySelector('#rows').children.length===999,'删除未同步');assert(view.document.querySelector('#rows').lastChild.textContent===rows.lastChild.textContent,'移动顺序错误');
+  passed.push('PASS 删除与节点移动');
+  const resources=new Resources('test','unused',()=>{}),bytes=new Uint8Array([1,2,3]);resources.keepVersion('test');
+  const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),v=>v.toString(16).padStart(2,'0')).join('');
+  await resources.add({id:'test_0',size:3,mime:'image/png',sha256},bytes);await Promise.all(resources.pending.values());assert(resources.bytes===3,'资源未接收');resources.dispose();assert(resources.bytes===0&&resources.sizes.size===0,'资源未清理');
+  passed.push('PASS 原生Blob资源释放与计账');source.__tabShareDOM.dispose();
+  result.textContent=passed.join('\n')+'\nALL PASS\n初始化批数 '+batches+'，序列化字符 '+total+'\nUA '+navigator.userAgent;
+ }catch(error){result.textContent=passed.join('\n')+'\nFAIL '+error.stack;}finally{button.disabled=false;}
+};
+</script>

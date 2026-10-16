@@ -762,6 +762,14 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 			if len(m.Detail) <= 8192 {
 				s.broadcast(se.ID, Message{Type: "notice", Detail: m.Detail})
 			}
+		case "geolocation":
+			if len(m.Data) <= 4096 && json.Valid([]byte(m.Data)) {
+				for viewer := range s.live[se.ID].viewers {
+					if viewer.id == m.ViewerID {
+						send(viewer, Message{Type: "geolocation", Data: m.Data})
+					}
+				}
+			}
 		case "download":
 			if validDownload(m.Download) {
 				for viewer := range s.live[se.ID].viewers {
@@ -965,7 +973,7 @@ func validInput(i *Input) bool {
 	}
 	if i.Selection != nil {
 		v := i.Selection
-		if len(v.Anchor) > 32 || len(v.Focus) > 32 || v.AnchorOffset < 0 || v.FocusOffset < 0 || v.Start < 0 || v.End < 0 || v.AnchorOffset > 100000 || v.FocusOffset > 100000 || v.Start > 100000 || v.End > 100000 {
+		if len(v.Anchor) > 32 || len(v.Focus) > 32 || v.AnchorOffset < 0 || v.FocusOffset < 0 || v.Start < 0 || v.End < 0 || v.AnchorOffset > 262144 || v.FocusOffset > 262144 || v.Start > 262144 || v.End > 262144 {
 			return false
 		}
 	}
@@ -979,6 +987,8 @@ func validInput(i *Input) bool {
 		return i.X >= 0 && i.X <= 16384 && i.Y >= 0 && i.Y <= 16384 && i.Buttons >= 0 && i.Buttons <= 7 && i.ClickCount >= 0 && i.ClickCount <= 3 && i.DeltaX >= -10000 && i.DeltaX <= 10000 && i.DeltaY >= -10000 && i.DeltaY <= 10000
 	case "keyDown", "keyUp":
 		return i.KeyCode >= 0 && i.KeyCode <= 255
+	case "geolocationResult", "downloadAck":
+		return i.Text != "" && json.Valid([]byte(i.Text))
 	case "text":
 		return i.Text != ""
 	case "scroll":

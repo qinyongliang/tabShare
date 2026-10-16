@@ -1,12 +1,13 @@
+import {BlobDownloads} from './blob-download.js';
 import {draggable} from './draggable.js';
 import {caretPosition,selectionState} from './caret.js';
 // The code below runs only in an isolated world of the explicitly shared tab.
-function bootstrap(draggable,caretPosition,selectionState) {
+function bootstrap(draggable,caretPosition,selectionState,BlobDownloads) {
   if(globalThis.__tabShareDOM&&!globalThis.__tabShareDOM.disposed){if(globalThis.__tabShareDOM.format===5)return;globalThis.__tabShareDOM.dispose?.();}
   const ids = new WeakMap(), nodes = new Map(), previous = new Map(), sizes=new Map(),dirty = new Set(), priority=new Set(),subtrees=new Set(), controls=new Set(), observed=new WeakSet(), listeners=[];
   const resources=new Map(), requests=[], closedRoots=new WeakMap(), extraCSS=new Map(), failedResources=new Set(),resourceUsers=new Map(),nodeAssets=new Map(),failedNodes=new Set();
-  const blobDownloads=new Map(),downloadRequests=[];
-  function downloadBlob(url){if(!url.startsWith('blob:'))throw Error('Unsupported download source');if(!blobDownloads.has(url)){if(blobDownloads.size>=2)blobDownloads.delete(blobDownloads.keys().next().value);const job=fetch(url).then(r=>r.blob()).then(blob=>{if(blob.size>64*1024*1024)throw Error('Download exceeds 64 MiB');return blob;});job.catch(()=>{});blobDownloads.set(url,job);}return blobDownloads.get(url);}
+  const blobDownloads=new BlobDownloads(),downloadRequests=[];
+  function downloadBlob(url){return blobDownloads.start(url);}
   listen(document,'tabshare-download',e=>{try{const value=JSON.parse(e.detail);if(typeof value.url==='string'&&value.url.length<2048&&value.url.startsWith('blob:')){downloadBlob(value.url);downloadRequests.push({url:value.url,suggestedFilename:String(value.suggestedFilename||'download').slice(0,200)});if(downloadRequests.length>4)downloadRequests.shift();mark(document.body);if(remoteInputActive)e.preventDefault();}}catch{}});
   listen(document,'click',e=>{const link=e.target.closest?.('a[download]');if(link?.href.startsWith('blob:'))try{downloadBlob(link.href);downloadRequests.push({url:link.href,suggestedFilename:link.download||'download'});if(downloadRequests.length>4)downloadRequests.shift();mark(document.body);if(remoteInputActive)e.preventDefault();}catch{};});
   let remoteInputActive=false,mode="dom", lastCSS="", widget,widgetRoot,widgetDrag,baseline,ownerViewport,rootStyleDirty=true,cssDirty=true,rootCSS='',wakeQueued=false,wakeUrgent=false,disposed=false,lastStyleChange=-Infinity;
@@ -82,7 +83,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
     observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true}); observers.push(observer);
   }
   function listen(target,type,fn,capture=true){target.addEventListener(type,fn,capture);listeners.push([target,type,fn,capture]);}
-  function dispose(){disposed=true;for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();priority.clear();subtrees.clear();stateRules.clear();stateQueue.clear();blobDownloads.clear();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
+  function dispose(){disposed=true;for(const o of observers)o.disconnect();for(const [target,type,fn,capture] of listeners)target.removeEventListener(type,fn,capture);dirty.clear();priority.clear();subtrees.clear();stateRules.clear();stateQueue.clear();blobDownloads.dispose();downloadRequests.length=0;widgetDrag?.dispose();widget?.remove();globalThis.__tabShareDOM.disposed=true;}
   observe(document.documentElement);
   for (const type of ['input','change','scroll','focusin','focusout','toggle','beforetoggle']) listen(document,type,stateEvent);
   listen(document,'load',e=>{if(['LINK','STYLE'].includes(e.target.tagName)){cssDirty=true;rootStyleDirty=true;mark(document.body,true);}else if(['IMG','VIDEO','IFRAME'].includes(e.target.tagName)){mark(e.target.parentElement,true);for(let n=e.target.parentElement;n;n=n.parentElement)mark(n);}wake(true);});
@@ -193,7 +194,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
     if(first){dirty.add(document.body);subtrees.add(document.body);}
     if(Date.now()-lastControlCheck>1000){
       lastControlCheck=Date.now();
-      for(const node of controls){if(!node.isConnected){controls.delete(node);continue;}const old=previous.get(ids.get(node));const value=node.type==='password'?'':String(node.value).slice(0,16000);if(old&&(old.value!==value||old.checked!==!!node.checked||old.selectedIndex!==(node.selectedIndex??null))){mark(node);checkControl(node);}}
+      for(const node of controls){if(!node.isConnected){controls.delete(node);continue;}const old=previous.get(ids.get(node));const value=node.type==='password'?'':String(node.value).slice(0,262144);if(old&&(old.value!==value||old.checked!==!!node.checked||old.selectedIndex!==(node.selectedIndex??null))){mark(node);checkControl(node);}}
     }
     refreshState();
     const meta={width:innerWidth,height:innerHeight,scrollX,scrollY,url:location.href,title:document.title,truncated,mode,devicePixelRatio,contextMenu,caret:caretPosition(document,node=>closedRoots.get(node),widgetRoot),selection:selectionState(document,node=>closedRoots.get(node)),pending:dirty.size>0};
@@ -207,7 +208,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
       const id=idFor(node),old=previous.get(id);
       if(!old&&previous.size>=30000){truncated=true;continue;}
       let value;
-      if(node.nodeType===3)value={id,tag:'#text',text:node.textContent.slice(0,16000)};
+      if(node.nodeType===3)value={id,tag:'#text',text:node.textContent.slice(0,262144)};
       else{
         const computed=getComputedStyle(node),visible=node.checkVisibility({checkVisibilityCSS:true}),style=styleOf(computed,visible),attrs={};
         for(const [name,v] of Object.entries(style))if(v===baseline?.[name])delete style[name];
@@ -221,7 +222,7 @@ function bootstrap(draggable,caretPosition,selectionState) {
         else{
           if(node.tagName==='A')try{const href=new URL(node.href);if(['http:','https:'].includes(href.protocol))value.href=href.href.slice(0,8192);}catch{}
           if(node.tagName==='IMG'){attrs.src=visible?resource(node.currentSrc||node.src):'';if(failedNodes.has(id)){value.tag='div';value.unsupported='image';}}
-          if(['INPUT','TEXTAREA','SELECT'].includes(node.tagName)){controls.add(node);controlStates.set(node,controlState(node));value.value=node.type==='password'?'':String(node.value).slice(0,16000);value.checked=!!node.checked;value.selectedIndex=node.selectedIndex??null;if(typeof node.selectionStart==='number'&&node===node.getRootNode().activeElement)value.caret={start:node.selectionStart,end:node.selectionEnd};}
+          if(['INPUT','TEXTAREA','SELECT'].includes(node.tagName)){controls.add(node);controlStates.set(node,controlState(node));value.value=node.type==='password'?'':String(node.value).slice(0,262144);value.checked=!!node.checked;value.selectedIndex=node.selectedIndex??null;if(typeof node.selectionStart==='number'&&node===node.getRootNode().activeElement)value.caret={start:node.selectionStart,end:node.selectionEnd};}
           if(node.tagName==='OPTION'){attrs.value=node.value;value.selected=!!node.selected;}
           if(node.isContentEditable&&node.hasAttribute('contenteditable'))value.editable=true;
           value.pseudos={};for(const pseudo of ['::before','::after','::backdrop']){const c=getComputedStyle(node,pseudo);if(pseudo==='::backdrop'&&node.tagName==='DIALOG'||c.content&&!['none','normal'].includes(c.content))value.pseudos[pseudo]={...styleOf(c,visible),content:rewrite(c.content,location.href,'image',visible)};}
@@ -338,9 +339,9 @@ function bootstrap(draggable,caretPosition,selectionState) {
       return images;
     }finally{image.close();}
   }
-  globalThis.__tabShareDOM={format:5,cropFrame,async downloadPart(url,offset){const blob=await downloadBlob(url),bytes=new Uint8Array(await blob.slice(offset,offset+262144).arrayBuffer());let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),size:blob.size,mime:blob.type};},downloadDone(url){blobDownloads.delete(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
+  globalThis.__tabShareDOM={format:5,cropFrame,async downloadPart(url,offset){const part=await blobDownloads.part(url,offset),bytes=part.bytes;let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));return {data:btoa(raw),done:part.done,mime:part.mime};},downloadDone(url){blobDownloads.stop(url);},ownerInput(suppressed){remoteInputActive=suppressed;if(suppressed)widget?.style.setProperty('pointer-events','none','important');else widget?.style.removeProperty('pointer-events');},async writeClipboardImage(input){
     try{const bytes=Uint8Array.from(atob(input.data),c=>c.charCodeAt(0));let blob=new Blob([bytes],{type:input.mime});if(input.mime!=='image/png'){const image=await createImageBitmap(blob);if(image.width*image.height>16777216){image.close();return false;}const canvas=new OffscreenCanvas(image.width,image.height);canvas.getContext('2d').drawImage(image,0,0);image.close();blob=await canvas.convertToBlob({type:'image/png'});}await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);return true;}catch{return false;}
   },get imagePasteCount(){return imagePasteCount;},ownerViewport(value){ownerViewport=value;widgetDrag?.resize();},capture,act,fallback,dispose,registerShadow,addStyles,setMode,limit,loadedResources(urls){let changed=false;for(const url of urls)if(!loadedURLs.has(url)){loadedURLs.add(url);changed=true;}if(changed){cssDirty=true;mark(document.body);wake(true);}},invalidate(){rootStyleDirty=true;cssDirty=true;mark(document.body,true);wake(true);},resourceFailed(id){failedResources.add(id);for(const nodeId of resourceUsers.get(id)||[]){failedNodes.add(nodeId);mark(nodes.get(nodeId));}},disposed:false,reset(){widget?.style.removeProperty('pointer-events');first=true;previous.clear();sizes.clear();retainedBytes=0;nodeAssets.clear();resourceUsers.clear();failedNodes.clear();truncated=false;dirty.clear();priority.clear();subtrees.clear();lastCapture=Date.now();}};
 }
-export const installDOM = '(' + bootstrap.toString() + ')('+draggable.toString()+','+caretPosition.toString()+','+selectionState.toString()+')';
+export const installDOM = '(' + bootstrap.toString() + ')('+draggable.toString()+','+caretPosition.toString()+','+selectionState.toString()+','+BlobDownloads.toString()+')';
 export const captureDOM = 'globalThis.__tabShareDOM.capture()';

@@ -1,0 +1,29 @@
+syntax = "proto3";
+package tabshare.benchmark;
+// Benchmark candidate, NOT a negotiated production wire format.
+message StringValue { oneof kind { string text = 1; bool deleted = 2; } }
+message Node {
+  string id = 1;
+  string tag = 2;
+  string text = 3;
+  map<string, StringValue> style = 4;
+  map<string, StringValue> attrs = 5;
+  repeated string children = 6;
+  optional uint32 styleRef = 7;
+}
+message Style { map<string, StringValue> values = 1; }
+message Update { string id = 1; Node changes = 2; }
+message Packet {
+  string type = 1;
+  string version = 2;
+  uint32 sequence = 3;
+  bool reset = 4;
+  string root = 5;
+  repeated Node nodes = 6;
+  repeated Update updates = 7;
+  repeated string removes = 8;
+  string action = 9;
+  string nodeId = 10;
+  string text = 11;
+  repeated Style styles = 12;
+}

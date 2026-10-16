@@ -64,11 +64,12 @@ export function validPeerInput(i) {
   const bounded=(v,min,max)=>typeof v==='number'&&Number.isFinite(v)&&v>=min&&v<=max;
   const short=(v,n)=>v==null||typeof v==='string'&&new TextEncoder().encode(v).length<=n;
   if(!short(i.version,80)||!short(i.text,8192)||!short(i.key,64)||!short(i.code,64)||!short(i.nodeId,32)||!bounded(i.modifiers??0,0,15))return false;
-  if(i.selection){const s=i.selection;if(!short(s.anchor,32)||!short(s.focus,32)||['anchorOffset','focusOffset','start','end'].some(k=>!bounded(s[k]??0,0,100000)))return false;}
+  if(i.selection){const s=i.selection;if(!short(s.anchor,32)||!short(s.focus,32)||['anchorOffset','focusOffset','start','end'].some(k=>!bounded(s[k]??0,0,262144)))return false;}
   switch(i.action){
     case 'mouseLeave':return !i.nodeId;
     case 'mouseMoved':case 'mousePressed':case 'mouseReleased':case 'mouseWheel':return ['','none','left','right','middle'].includes(i.button??'')&&bounded(i.x,0,16384)&&bounded(i.y,0,16384)&&bounded(i.buttons??0,0,7)&&bounded(i.clickCount??0,0,3)&&bounded(i.deltaX??0,-10000,10000)&&bounded(i.deltaY??0,-10000,10000);
     case 'keyDown':case 'keyUp':return bounded(i.keyCode??0,0,255);
+    case 'geolocationResult':case 'downloadAck':return typeof i.text==='string'&&i.text.length>0;
     case 'text':return typeof i.text==='string'&&i.text.length>0;
     case 'scroll':return !!i.nodeId&&bounded(i.scrollTop??0,0,10000000)&&bounded(i.scrollLeft??0,0,10000000);
     case 'select':return !!i.nodeId&&Array.isArray(i.values)&&i.values.length<=128&&i.values.every(v=>typeof v==='string')&&new TextEncoder().encode(i.values.join('')).length<=8192;

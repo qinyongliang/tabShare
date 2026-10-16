@@ -1,0 +1,52 @@
+{
+  "runtime": "v24.19.0",
+  "protobufVersion": "8.8.1",
+  "scope": "Synthetic subset; map/null adapter costs included; initialPooled includes production-style pooling; prototype is not the full schema",
+  "cases": [
+    {
+      "name": "input",
+      "jsonBytes": 76,
+      "protobufBytes": 39,
+      "jsonGzipBytes": 91,
+      "protobufGzipBytes": 60,
+      "jsonRoundtripMs": 0.0008703809999999947,
+      "protobufRoundtripMs": 0.0014430129999999934
+    },
+    {
+      "name": "textDiff",
+      "jsonBytes": 108,
+      "protobufBytes": 40,
+      "jsonGzipBytes": 124,
+      "protobufGzipBytes": 61,
+      "jsonRoundtripMs": 0.001489904000000024,
+      "protobufRoundtripMs": 0.002939606999999995
+    },
+    {
+      "name": "stylesDiff",
+      "jsonBytes": 2039,
+      "protobufBytes": 1355,
+      "jsonGzipBytes": 256,
+      "protobufGzipBytes": 216,
+      "jsonRoundtripMs": 0.019930884000000048,
+      "protobufRoundtripMs": 0.04942784400000005
+    },
+    {
+      "name": "initial",
+      "jsonBytes": 42651,
+      "protobufBytes": 32691,
+      "jsonGzipBytes": 2701,
+      "protobufGzipBytes": 2645,
+      "jsonRoundtripMs": 0.35673551999999975,
+      "protobufRoundtripMs": 1.0257696800000007
+    },
+    {
+      "name": "initialPooled",
+      "jsonBytes": 25624,
+      "protobufBytes": 13559,
+      "jsonGzipBytes": 2545,
+      "protobufGzipBytes": 2257,
+      "jsonRoundtripMs": 0.21926339000000097,
+      "protobufRoundtripMs": 0.5553668400000015
+    }
+  ]
+}

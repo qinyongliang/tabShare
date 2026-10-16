@@ -1,3 +1,5 @@
+import {DownloadAcks} from '../extension/download-flow.js';
+import {GeolocationBroker,geolocationHook} from '../extension/geolocation.js';
 import {InputQueue} from '../extension/input-queue.js';
 import {DocumentState} from '../extension/document-state.js';
 import {compressPacket,decodeJSONPacket} from '../extension/peer.js';
@@ -138,7 +140,7 @@ try {
   const workerSource=(await readFile(path.join(root,'extension/worker.js'),'utf8')).replace(/^import .*;$/gm,'');
 
   const resourceReads=[];class TestResources extends ResourceBridge {async read(url){try{const result=await super.read(url);resourceReads.push({kind:url.split('/').pop(),base64:result.base64Encoded,length:(result.content||result.body||'').length});return result;}catch(e){resourceReads.push({kind:url.split('/').pop(),error:e.message});throw e;}}}
-  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,ResourceBridge:TestResources,DocumentState,compressPacket,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
+  const sandbox={chrome,fetch,WebSocket:AgentSocket,crypto:globalThis.crypto,TextEncoder,TextDecoder,atob,btoa,GeolocationBroker,geolocationHook,DownloadAcks,ResourceBridge:TestResources,DocumentState,compressPacket,InputQueue,serverOrigin,targetURL,resolveTab,cdpInput,rasterFrame,validPeerInput,installDOM,captureDOM,console,
     setTimeout:(fn,ms)=>{const t=setTimeout(fn,ms);t.unref();return t;},clearTimeout,setInterval:(fn,ms)=>{const t=setInterval(fn,ms);timers.add(t);return t;},clearInterval:t=>{clearInterval(t);timers.delete(t);}};
 
   if(rtcEnabled){
@@ -190,6 +192,24 @@ try {
   assert.equal(tabShare.ok, true, tabShare.error);
   visitors = await chromium.launch({executablePath: browserPath, headless: true, args: ['--no-sandbox']});
   const context = await visitors.newContext({viewport: {width: 1440, height: 1000}});
+  // Exercise real streamed writes to OPFS. Only the OS picker is adapted;
+  // native picker permission/UI still requires a manual Chromium check.
+  await context.addInitScript(()=>{
+    globalThis.__savedTestFiles=[];let serial=0;
+    globalThis.showSaveFilePicker=async({suggestedName})=>{
+      const root=await navigator.storage.getDirectory(),path='tabshare-test-'+(++serial),handle=await root.getFileHandle(path,{create:true});
+      return {createWritable:async()=>{const writer=await handle.createWritable();return {
+        write:bytes=>writer.write(bytes),abort:()=>writer.abort(),close:async()=>{await writer.close();globalThis.__savedTestFiles.push({name:suggestedName,path});}
+      };}};
+    };
+  });
+  async function forwardedDownload(page,click){
+    const before=await page.evaluate(()=>globalThis.__savedTestFiles.length);await click();
+    await page.getByRole('button',{name:/^保存 /}).click();
+    await page.waitForFunction(n=>globalThis.__savedTestFiles.length>n,before,{timeout:30000});
+    return page.evaluate(async n=>{const record=globalThis.__savedTestFiles[n],root=await navigator.storage.getDirectory(),handle=await root.getFileHandle(record.path),file=await handle.getFile();return {name:record.name,bytes:[...new Uint8Array(await file.arrayBuffer())]};},before);
+  }
+
   const errors = [],viewerInputs=[];
   async function view(url,viewerContext=context) { const page = await viewerContext.newPage();if(rtcEnabled)await page.addInitScript(forceRelay=>{const RealRTC=RTCPeerConnection;globalThis.__rtc=[];globalThis.RTCPeerConnection=class extends RealRTC{constructor(c){super(forceRelay?{...c,iceTransportPolicy:'relay'}:c);__rtc.push(this);}};},useTURN); page.on('request',r=>{if(new URL(r.url()).pathname.startsWith('/api/clipboard/'))clipboardUploads++;});page.on('pageerror',e=>errors.push(e.message));if(rtcEnabled)page.on('console',m=>{if(m.text().includes('TabShare RTC'))console.log(m.text());});page.on('websocket',socket=>{socket.on('framesent',({payload})=>{try{const m=JSON.parse(String(payload));if(m.type==='input')viewerInputs.push(m.input);}catch{}});}); await page.goto(url); await page.locator('#surface').waitFor({state:'visible',timeout:20000}).catch(async error=>{console.log('Initial connection diagnostics:',{status:await page.locator('#status').textContent(),errors,failures:commandFailures.slice(-4),packets:packets.slice(-4).map(p=>({nodes:p.document.nodes.length,meta:p.document.meta})),targets:vm.runInContext('[...targets].map(([id,t])=>({id,context:t.contextId,history:t.navigation}))',sandbox)});throw error;}); await page.locator('#dot.live').waitFor({state:'attached'}); return page; }
   if(realSites){
@@ -275,14 +295,14 @@ try {
   await remoteOne.locator('#context-zone').click({button:'right'});await remoteOne.locator('#context-action').waitFor();await until(()=>one.locator('#page-context-menu').isHidden(),'custom webpage context menu replaces viewer fallback menu');await remoteOne.locator('#context-action').click();await until(()=>state.contextClicked,'original webpage context action');
   console.log('Image paste event trusted:',state.imageTrusted);console.log('PASS: real Ctrl+V image paste through '+(rtcEnabled?'peer asset channel':'authenticated HTTP')+', webpage context menu and native input context handling');
   for(const [selector,method] of [['#download-get','GET'],['#download-post','POST']]){
-    const before=state.downloadRequests||0,downloadPromise=one.waitForEvent('download');await remoteOne.locator(selector).click();const download=await downloadPromise;
-    assert.equal(download.suggestedFilename(),'共享报告.bin');assert.deepEqual(await readFile(await download.path()),Buffer.from(Array.from({length:300001},(_,i)=>i%251)));
+    const before=state.downloadRequests||0,download=await forwardedDownload(one,()=>remoteOne.locator(selector).click());
+    assert.equal(download.name,'共享报告.bin');assert.deepEqual(Buffer.from(download.bytes),Buffer.from(Array.from({length:300001},(_,i)=>i%251)));
     assert.equal(state.downloadRequests,before+1,'download response must not repeat the original HTTP request');assert.equal(state.downloadMethod,method);if(method==='POST')assert.equal(state.downloadBody,'ticket=one-use-fixture');
     assert.ok(await remoteOne.locator('#text').isVisible(),'download preserves the shared page');
     console.log('PASS: exact original '+method+' download response');
   }
-  const blobDownload=one.waitForEvent('download',{timeout:10000}).catch(async error=>{console.log('Blob source:',await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'(()=>{const n=document.querySelector("#download-blob"),r=n?.getBoundingClientRect();return {path:location.pathname,node:!!n,handler:!!n?.onclick,generated:!!globalThis.generatedClick,rect:r?.toJSON(),hit:r&&document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.id}})()',returnByValue:true}).then(r=>r.result.value));console.log('Blob input:',receivedInputs.slice(-3),vm.runInContext('[...targets.values()].map(t=>({ready:t.documentReady,pending:!!t.pending,version:t.document.version,ctx:t.contextId,actorAgo:Date.now()-(t.lastActor?.time||0)}))',sandbox));console.log('Blob download diagnostic:',await one.locator('#status').textContent(),vm.runInContext('[...targets.values()].map(t=>({lastActor:!!t.lastActor,lastBlob:!!t.lastBlob,count:t.downloadCount}))',sandbox),commandFailures.map(f=>({method:f.method,error:f.error})),errors);throw error;});await remoteOne.locator('#download-blob').click();const generated=await blobDownload;assert.equal(generated.suggestedFilename(),'generated.txt');assert.equal(await readFile(await generated.path(),'utf8'),'generated file 中文');
-  console.log('PASS: GET, POST and generated Blob binary downloads reach native visitor downloads without replaying requests');
+  const generated=await forwardedDownload(one,()=>remoteOne.locator('#download-blob').click());assert.equal(generated.name,'generated.txt');assert.equal(Buffer.from(generated.bytes).toString(),'generated file 中文');
+  console.log('PASS: GET, POST and generated Blob binary downloads stream to visitor storage without replaying requests (picker adapted)');
   const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
   await one.locator('#share-settings-toggle').click();await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
   await until(()=>sourceMetrics().then(m=>m.width!==1440),'restore source before independent display checks');
@@ -446,7 +466,7 @@ try {
   await child.locator('#surface').waitFor({state:'visible',timeout:20000});const childPage=child.frameLocator('#mirror');await childPage.locator('h1').filter({hasText:'Shared induced popup'}).waitFor({state:'visible',timeout:20000});
   await compatibility.locator('#closed-button').waitFor({state:'visible'});assert.equal(await reopened.locator('#mirror').isVisible(),true,'parent remains on its original page');
   await childPage.locator('#popup-text').click();await child.keyboard.insertText('popup input');await until(()=>childPage.locator('#popup-text').inputValue().then(v=>v==='popup input'),'child has independent native input');
-  const popupDownload=child.waitForEvent('download');await childPage.locator('#popup-download').click();assert.equal((await popupDownload).suggestedFilename(),'共享报告.bin');
+  const popupDownload=await forwardedDownload(child,()=>childPage.locator('#popup-download').click());assert.equal(popupDownload.name,'共享报告.bin');
   const childClosed=child.waitForEvent('close');await childPage.locator('button').click();await childClosed;await compatibility.locator('#closed-button').waitFor({state:'visible',timeout:20000});assert.equal((await getTabs()).find(t=>t.id===newTab.id).targetId,newSources[0].targetId,'closing child preserves original source');
 
   for(const selector of ['#blank-popup','#delayed-popup']){const opened=reopened.waitForEvent('popup');await reopened.bringToFront();await compatibility.locator(selector).click();const extra=await opened;await extra.frameLocator('#mirror').locator('#popup-text').waitFor({state:'visible',timeout:20000});const closed=extra.waitForEvent('close');await extra.frameLocator('#mirror').locator('button').click();await closed;await compatibility.locator('#closed-button').waitFor({state:'visible'});}

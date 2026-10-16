@@ -1,3 +1,5 @@
+import {DownloadAcks} from './download-flow.js';
+import {GeolocationBroker,geolocationHook} from './geolocation.js';
 import {InputQueue} from './input-queue.js';
 import {DocumentState} from './document-state.js';
 import {serverOrigin, targetURL, resolveTab, cdpInput, rasterFrame, validPeerInput} from './controller.js';
@@ -24,8 +26,8 @@ async function offscreen(message) {
 }
 function roomPeers(id){return [...peers.values()].filter(p=>p.sessionId===id);}
 function publish(message) {
-  const members=roomPeers(message.sessionId);
-  if(members.some(p=>p.direct))void offscreen({type:'send',sessionId:message.sessionId,message}).catch(()=>{});
+  const members=roomPeers(message.sessionId).filter(p=>!message.viewerId||p.viewerId===message.viewerId);
+  if(members.some(p=>p.direct))void offscreen({type:'send',sessionId:message.sessionId,viewerId:message.viewerId,message}).catch(()=>{});
   if(members.some(p=>!p.direct)||!members.length)return transmit(message);
   return true;
 }
@@ -49,6 +51,7 @@ async function peerJoined(m) {
   if(chrome.offscreen&&!ok)await peerState({...m,status:'down'});
 }
 async function peerLeft(m) {
+  const ownerBinding=bindings.get(m.sessionId);targets.get(ownerBinding?.tabId)?.geo?.leave(m);targets.get(ownerBinding?.tabId)?.downloadAcks?.leave(m);
   peers.delete(m.sessionId+':'+m.viewerId);
   await offscreen({...m,type:'peer-left'}).catch(()=>{});
   releaseRelayMarks(m.sessionId);
@@ -92,6 +95,7 @@ function requestSnapshot(tabId,urgent=false){
 function enqueueInput(message){
   const binding=bindings.get(message.sessionId),target=binding&&targets.get(binding.tabId);if(!target)return;
   const member=peers.has(message.sessionId+':'+message.input.viewerId);
+  if(message.input.action==='downloadAck'||message.input.action==='geolocationResult')return control(message);
   const run=async()=>{if(bindings.get(message.sessionId)!==binding||member&&!peers.has(message.sessionId+':'+message.input.viewerId))return;try{const result=await control(message);if(['mouseMoved','mouseLeave','mouseReleased','text','keyDown','scroll','select'].includes(message.input.action)){target.needsFrame=true;target.nextVideo=0;requestSnapshot(binding.tabId,true);}return result;}catch(error){if(contextChanged(error)){target.pending=null;target.nextSend=0;return;}if(bindings.get(message.sessionId)===binding)publish({type:'notice',sessionId:message.sessionId,detail:error.message});}};
   if(message.input.action==='dialog')return run();
   target.inputs??=new InputQueue();
@@ -164,12 +168,21 @@ function status(sessionId, value, detail = '', tab = {}) {
 }
 function downloadActor(tabId){const t=targets.get(tabId),a=t?.lastActor;return a&&Date.now()-a.time<15000&&bindings.get(a.sessionId)?.tabId===tabId?a:null;}
 async function downloadChunk(tabId,actor,meta,bytes){
-  if(bindings.get(actor.sessionId)?.tabId!==tabId)throw Error('下载来源页面已关闭');
+  const target=targets.get(tabId);
+  if(!target||bindings.get(actor.sessionId)?.tabId!==tabId)throw Error('下载来源页面已关闭');
+  const acks=target.downloadAcks??=new DownloadAcks();
   meta={kind:'download-chunk',...meta,sha256:Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),n=>n.toString(16).padStart(2,'0')).join('')};
-  let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));const data=btoa(raw),peer=peers.get(actor.sessionId+':'+actor.viewerId);
-  if(actor.direct){if(peer?.direct&&await offscreen({type:'download-chunk',sessionId:actor.sessionId,viewerId:actor.viewerId,meta,data}))return;throw Error('P2P 下载连接已中断，请重新下载');}
-  const end=Date.now()+10000;while(socket?.readyState===WebSocket.OPEN&&socket.bufferedAmount>262144&&Date.now()<end)await new Promise(r=>setTimeout(r,25));
-  if(!transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{...meta,data}}))throw Error('下载连接已中断');
+  const acknowledged=acks.wait(meta.id,meta.offset+bytes.length,actor);
+  try{
+    let raw='';for(let i=0;i<bytes.length;i+=4096)raw+=String.fromCharCode(...bytes.subarray(i,i+4096));const data=btoa(raw),peer=peers.get(actor.sessionId+':'+actor.viewerId);
+    if(actor.direct){
+      if(!peer?.direct||!await offscreen({type:'download-chunk',sessionId:actor.sessionId,viewerId:actor.viewerId,meta,data}))throw Error('P2P 下载连接已中断，请重新下载');
+    }else{
+      const end=Date.now()+10000;while(socket?.readyState===WebSocket.OPEN&&socket.bufferedAmount>262144&&Date.now()<end)await new Promise(r=>setTimeout(r,25));
+      if(!transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{...meta,data}}))throw Error('下载连接已中断');
+    }
+    await acknowledged;
+  }catch(error){acks.cancel(meta.id,error.message);throw error;}
 }
 async function downloadResponse(tabId,p){
   const headers=Object.fromEntries((p.responseHeaders||[]).map(h=>[h.name.toLowerCase(),h.value])),t=targets.get(tabId),actor=t?.downloadActors?.get(p.networkId)||downloadActor(tabId);
@@ -181,18 +194,20 @@ async function downloadResponse(tabId,p){
   const meta={id,name:name.slice(0,120),mime:(headers['content-type']||'application/octet-stream').split(';')[0].slice(0,100)};
   let stream,offset=0,reserved=false;
   try{
-    if((t.downloadCount||0)>=2||Number(headers['content-length'])>64*1024*1024)throw Error('单次下载上限 64 MiB，最多同时转发两个文件');t.downloadCount=(t.downloadCount||0)+1;reserved=true;
+    if((t.downloadCount||0)>=2)throw Error('最多同时转发两个文件');t.downloadCount=(t.downloadCount||0)+1;reserved=true;
+    await downloadChunk(tabId,recipient,{...meta,offset:0,done:false},new Uint8Array());
     ({stream}=await command(tabId,'Fetch.takeResponseBodyAsStream',{requestId:p.requestId}));
-    for(;;){const chunk=await command(tabId,'IO.read',{handle:stream,size:262144}),bytes=chunk.base64Encoded?Uint8Array.from(atob(chunk.data),c=>c.charCodeAt(0)):new TextEncoder().encode(chunk.data);if(offset+bytes.length>64*1024*1024)throw Error('下载超过 64 MiB 上限');await downloadChunk(tabId,recipient,{...meta,offset,done:!!chunk.eof},bytes);offset+=bytes.length;if(chunk.eof)break;}
+    for(;;){const chunk=await command(tabId,'IO.read',{handle:stream,size:262144}),bytes=chunk.base64Encoded?Uint8Array.from(atob(chunk.data),c=>c.charCodeAt(0)):new TextEncoder().encode(chunk.data);if(!Number.isSafeInteger(offset+bytes.length))throw Error('下载偏移超出协议范围');await downloadChunk(tabId,recipient,{...meta,offset,done:!!chunk.eof},bytes);offset+=bytes.length;if(chunk.eof)break;}
   }catch(error){transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{id,offset:0,error:error.message.slice(0,500)}});}
-  finally{if(reserved)t.downloadCount--;if(stream){await command(tabId,'IO.close',{handle:stream}).catch(()=>{});await command(tabId,'Fetch.failRequest',{requestId:p.requestId,errorReason:'Aborted'}).catch(()=>{});}else await command(tabId,'Fetch.continueRequest',{requestId:p.requestId}).catch(()=>{});}
+  finally{if(reserved)t.downloadCount--;if(stream){await command(tabId,'IO.close',{handle:stream}).catch(()=>{});await command(tabId,'Fetch.failRequest',{requestId:p.requestId,errorReason:'Aborted'}).catch(()=>{});}else await command(tabId,'Fetch.failRequest',{requestId:p.requestId,errorReason:'Aborted'}).catch(()=>{});}
 }
 async function downloadBlob(tabId,p){
   const actor=downloadActor(tabId),t=targets.get(tabId);if(!actor||!p.url.startsWith('blob:'))return;
   if(t.lastBlob?.url===p.url&&t.lastBlob?.actorTime===actor.time)return;t.lastBlob={url:p.url,actorTime:actor.time};
   const recipient={...actor,direct:!!peers.get(actor.sessionId+':'+actor.viewerId)?.direct},id=crypto.randomUUID();let reserved=false;
   try{if((t.downloadCount||0)>=2)throw Error('同时下载数量超过上限');t.downloadCount=(t.downloadCount||0)+1;reserved=true;await world(tabId);
-    for(let offset=0;;){const part=await evaluate(tabId,'globalThis.__tabShareDOM.downloadPart('+JSON.stringify(p.url)+','+offset+')'),bytes=Uint8Array.from(atob(part.data),c=>c.charCodeAt(0));if(offset===0&&p.guid)await command(tabId,'Browser.cancelDownload',{guid:p.guid}).catch(()=>{});await downloadChunk(tabId,recipient,{id,name:String(p.suggestedFilename||'download').slice(0,120),mime:part.mime||'application/octet-stream',offset,done:offset+bytes.length>=part.size},bytes);offset+=bytes.length;if(offset>=part.size)break;}
+    await downloadChunk(tabId,recipient,{id,name:String(p.suggestedFilename||'download').slice(0,120),mime:'application/octet-stream',offset:0,done:false},new Uint8Array());
+    for(let offset=0;;){const part=await evaluate(tabId,'globalThis.__tabShareDOM.downloadPart('+JSON.stringify(p.url)+','+offset+')'),bytes=Uint8Array.from(atob(part.data),c=>c.charCodeAt(0));if(offset===0&&p.guid)await command(tabId,'Browser.cancelDownload',{guid:p.guid}).catch(()=>{});await downloadChunk(tabId,recipient,{id,name:String(p.suggestedFilename||'download').slice(0,120),mime:part.mime||'application/octet-stream',offset,done:part.done===true},bytes);offset+=bytes.length;if(part.done)break;}
   }catch(error){transmit({type:'download',sessionId:actor.sessionId,viewerId:actor.viewerId,download:{id,offset:0,error:error.message.slice(0,500)}});}
   finally{if(reserved)t.downloadCount--;await evaluate(tabId,'globalThis.__tabShareDOM.downloadDone('+JSON.stringify(p.url)+')').catch(()=>{});}
 }
@@ -259,6 +274,7 @@ async function world(tabId) {
   const contextId=target.contextId;
   try{await command(tabId,'Runtime.addBinding',{name:'__tabShareWake',executionContextId:contextId});target.wakeEnabled=true;}catch{target.wakeEnabled=false;}
   await evaluate(tabId, installDOM,contextId);
+  target.frameId=tree.frameTree.frame.id;await installGeolocation(tabId,target);
   await command(tabId,'Runtime.evaluate',{expression:'('+downloadClickHook.toString()+')()',returnByValue:true}).catch(()=>{});
   await evaluate(tabId, 'globalThis.__tabShareDOM.reset()',contextId);
   if(target.nativeViewport)await evaluate(tabId,'globalThis.__tabShareDOM.ownerViewport('+JSON.stringify(target.nativeViewport)+')',contextId);
@@ -272,7 +288,33 @@ async function world(tabId) {
   })().catch(error=>{if((target.contextEpoch||0)===epoch){target.contextId=null;target.resources?.dispose();target.resources=null;}throw error;}).finally(()=>{if(target.worldTask===task)target.worldTask=null;});
   target.worldTask=task;return task;
 }
-function invalidateWorld(target){clearTimeout(target.wakeTimer);target.wakeTimer=null;target.wakePending=false;target.wakeUrgent=false;target.wakeEnabled=false;target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;target.navigation=null;target.historyURL=null;target.documentReady=false;}
+function invalidateWorld(target){target.downloadAcks?.dispose();target.geo?.dispose();target.geo=null;clearTimeout(target.wakeTimer);target.wakeTimer=null;target.wakePending=false;target.wakeUrgent=false;target.wakeEnabled=false;target.contextEpoch=(target.contextEpoch||0)+1;target.contextId=null;target.resources?.dispose();target.resources=null;target.captureLimited=false;target.navigation=null;target.historyURL=null;target.documentReady=false;}
+async function installGeolocation(tabId,target){
+  if(target.geo)return;
+  const main=[...target.contexts?.values()||[]].find(c=>c.auxData?.isDefault&&c.auxData.frameId===target.frameId);
+  if(!main||!/^https?:\/\//.test(main.origin))return;
+  const contextId=main.id,generation=target.contextEpoch||0;
+  const existing=await command(tabId,'Runtime.evaluate',{contextId,expression:'globalThis.__tabShareGeolocation&&!globalThis.__tabShareGeolocation.disposed?globalThis.__tabShareGeolocation.epoch:null',returnByValue:true});
+  const oldEpoch=existing.result?.value,epoch=typeof oldEpoch==='string'&&/^[-A-Za-z0-9_]{8,80}$/.test(oldEpoch)?oldEpoch:crypto.randomUUID();
+  const broker=new GeolocationBroker({epoch,origin:new URL(main.origin).origin,
+    send:(owner,request)=>publish({type:'geolocation',sessionId:owner.sessionId,viewerId:owner.viewerId,data:JSON.stringify(request)}),
+    deliver:result=>{void command(tabId,'Runtime.evaluate',{contextId,expression:'globalThis.__tabShareGeolocation?.resolve('+JSON.stringify(result)+')',returnByValue:true}).catch(()=>{});}
+  });
+  await command(tabId,'Runtime.addBinding',{name:'__tabShareGeolocationRequest',executionContextId:contextId});
+  if((target.contextEpoch||0)!==generation||targets.get(tabId)!==target){broker.dispose();throw Error('共享页面正在切换');}
+  target.geo=broker;target.geoMainContext=contextId;
+  try{
+    const expression=oldEpoch===epoch?'globalThis.__tabShareGeolocation.attach()':'('+geolocationHook.toString()+')('+JSON.stringify(epoch)+',"__tabShareGeolocationRequest")';
+    await command(tabId,'Runtime.evaluate',{contextId,expression,returnByValue:true});
+    if((target.contextEpoch||0)!==generation){broker.dispose();if(target.geo===broker)target.geo=null;throw Error('共享页面正在切换');}
+  }catch(error){broker.dispose();if(target.geo===broker)target.geo=null;throw error;}
+}
+function geolocationOwner(tabId,target){
+  const actor=target.lastActor;
+  if(actor&&Date.now()-actor.time<15000&&peers.has(actor.sessionId+':'+actor.viewerId)&&bindings.get(actor.sessionId)?.tabId===tabId)return actor;
+  const members=[...target.sessions].flatMap(sessionId=>roomPeers(sessionId).map(p=>({sessionId,viewerId:p.viewerId})));
+  return members.length===1?members[0]:null;
+}
 async function evaluate(tabId, expression,expectedContext) {
   const target = targets.get(tabId);
   const contextId=expectedContext??target?.contextId;
@@ -415,6 +457,7 @@ async function targetFor(tab,mode='dom') {
   target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
   try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});await command(tab.id,'Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Response'}]});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
+  const geoScript=await command(tab.id,'Page.addScriptToEvaluateOnNewDocument',{source:'('+geolocationHook.toString()+')(crypto.randomUUID(),"__tabShareGeolocationRequest")'});target.geoScriptId=geoScript.identifier;
   target.timer=setInterval(()=>{if(!target.wakeEnabled||Date.now()-(target.lastPoll||0)>=1000)void snapshot(tab.id);},200);target.rasterTimer=setInterval(()=>void raster(tab.id),500);target.videoTimer=setInterval(()=>void backgroundVideo(tab.id),33);return target;
 }
 async function switchTab(id,tab,binding) {
@@ -468,6 +511,9 @@ async function pause(sessionId) {
   if(target.contextId)try{await command(binding.tabId,'Runtime.evaluate',{expression:'globalThis.__tabShareDOM?.dispose()',contextId:target.contextId,returnByValue:true});}catch{}
   await command(binding.tabId,'Runtime.evaluate',{expression:"(()=>{const key=Symbol.for('tabshare.downloadHook'),hook=globalThis[key];if(hook){if(HTMLAnchorElement.prototype.click===hook.click)HTMLAnchorElement.prototype.click=hook.original;delete globalThis[key];}})()",returnByValue:true}).catch(()=>{});
   targets.delete(binding.tabId);
+  target.downloadAcks?.dispose();target.geo?.dispose();
+  if(target.geoScriptId)await command(binding.tabId,'Page.removeScriptToEvaluateOnNewDocument',{identifier:target.geoScriptId}).catch(()=>{});
+  if(target.geoMainContext)await command(binding.tabId,'Runtime.evaluate',{contextId:target.geoMainContext,expression:'globalThis.__tabShareGeolocation?.dispose()',returnByValue:true}).catch(()=>{});
   await command(binding.tabId,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
   try { await chrome.debugger.detach({tabId: binding.tabId}); } catch { /* Already closed/detached. */ }
 }
@@ -478,6 +524,8 @@ async function control(message) {
   let input = message.input;
   const {action} = input;
   const target=targets.get(binding.tabId);
+  if(action==='downloadAck'){try{target?.downloadAcks?.accept({sessionId:message.sessionId,viewerId:input.viewerId},JSON.parse(input.text));}catch{}return;}
+  if(action==='geolocationResult'){try{target?.geo?.respond({sessionId:message.sessionId,viewerId:input.viewerId},JSON.parse(input.text));}catch{}return;}
   if(input.version&&(!target.documentReady||input.version!==target.document.version))return;
   if(input.viewerId&&['mousePressed','mouseReleased','keyDown','text'].includes(action))target.lastActor={sessionId:message.sessionId,viewerId:input.viewerId,time:Date.now()};
   if(action==='pasteImage'){const paste=async()=>{
@@ -514,6 +562,13 @@ async function control(message) {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const target = targets.get(source.tabId);
   if(!target)return;
+  if(method==='Runtime.executionContextCreated'){(target.contexts??=new Map()).set(params.context.id,params.context);return;}
+  if(method==='Runtime.executionContextDestroyed')target.contexts?.delete(params.executionContextId);
+  if(method==='Runtime.executionContextsCleared')target.contexts?.clear();
+  if(method==='Runtime.bindingCalled'&&params.name==='__tabShareGeolocationRequest'){
+    if(params.executionContextId!==target.geoMainContext||typeof params.payload!=='string'||params.payload.length>2048)return;
+    try{target.geo?.request(JSON.parse(params.payload),geolocationOwner(source.tabId,target));}catch{}return;
+  }
   if(method==='Runtime.bindingCalled'&&params.name==='__tabShareWake'){
     if(params.executionContextId!==target.contextId||typeof params.payload!=='string'||params.payload.length>200)return;
     try{const signal=JSON.parse(params.payload);if(signal.version===target.document.version||!target.documentReady)requestSnapshot(source.tabId,signal.urgent===true);}catch{}return;
@@ -542,6 +597,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 function detached(tabId, reason) {
   const target = targets.get(tabId);
   if (!target) return;
+  target.downloadAcks?.dispose();target.geo?.dispose();
   target.inputs?.clear();clearInterval(target.timer);clearTimeout(target.progressTimer);clearTimeout(target.wakeTimer);clearTimeout(target.styleRefresh);
   clearInterval(target.rasterTimer);clearInterval(target.videoTimer);
   target.resources?.dispose();nativeTabs.delete(tabId);void offscreen({type:'stop-video',tabId}).catch(()=>{});targets.delete(tabId);

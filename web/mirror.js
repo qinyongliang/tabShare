@@ -44,7 +44,15 @@ export class Mirror {
     const id=data.id||node.dataset?.nodeId;
     if(remember&&id){
       const old=this.states.get(id)||{};if(data.children){for(const child of old.children||[])if(this.parents.get(child)===id)this.parents.delete(child);for(const child of data.children)this.parents.set(child,id);}
-      const state={...old,...data,style:{...old.style,...data.style},attrs:{...old.attrs,...data.attrs}};this.states.set(id,state);
+      // Sparse patches must not clone every cached style on a text/input update.
+      // Keep unchanged maps shared; copy only fields actually present in the diff.
+      const state={...old,...data};
+      for(const field of ['style','attrs'])if(data[field]){
+        const values={...old[field]};
+        for(const [name,value] of Object.entries(data[field]))if(value===null)delete values[name];else values[name]=value;
+        state[field]=values;
+      }
+      this.states.set(id,state);
       if(data.style||data.attrs||data.pseudos)this.indexResources(id,state);
       if(typeof state.modal==='boolean'||typeof state.popoverOpen==='boolean')this.topLayers.add(id);
     }

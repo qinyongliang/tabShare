@@ -23,7 +23,7 @@ test('release backfill resolves annotated tags and selects only their successful
 
 test('release refuses expired artifacts and a workflow completion from another branch',async()=>{
   const expired=selection();expired.artifacts[0].expired=true;await assert.rejects(selectRelease(expired),/expired/);
-  const branch=selection({head_branch:'main'});branch.context.eventName='workflow_run';branch.context.payload.workflow_run=branch.run;await selectRelease(branch);assert.equal(branch.outputs.publish,'false');
+  const branch=selection({head_branch:'feature/test'});branch.context.eventName='workflow_run';branch.context.payload.workflow_run=branch.run;await selectRelease(branch);assert.equal(branch.outputs.publish,'false');
 });
 
 test('release verifies all seven checksums before preparing uploads, preserving each checksum',async()=>{
@@ -36,3 +36,12 @@ test('release verifies all seven checksums before preparing uploads, preserving 
     const rejected=path.join(root,'rejected');await assert.rejects(prepareRelease(input,rejected),/Checksum mismatch/);assert.deepEqual(await readdir(rejected),[]);
   }finally{await rm(root,{recursive:true,force:true});}
 });
+
+ test('main builds publish only verified artifacts and create a fresh version tag',async()=>{
+ const s=selection({head_branch:'main'});s.context.eventName='workflow_run';s.context.payload.workflow_run=s.run;let created;
+ s.github.rest.git.getRef=async()=>{throw Object.assign(new Error('missing'),{status:404});};
+ s.github.rest.git.createRef=async value=>{created=value;};
+ await selectRelease(s);assert.equal(s.outputs.publish,'true');assert.equal(created.ref,'refs/tags/v0.5.2');assert.equal(created.sha,s.run.head_sha);
+ const bad=selection({head_branch:'main',conclusion:'failure'});bad.context.eventName='workflow_run';bad.context.payload.workflow_run=bad.run;await assert.rejects(selectRelease(bad),/provenance/);
+ const missing=selection({head_branch:'main'});missing.context.eventName='workflow_run';missing.context.payload.workflow_run=missing.run;missing.artifacts.pop();await assert.rejects(selectRelease(missing),/Missing/);
+ });

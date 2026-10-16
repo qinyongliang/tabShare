@@ -147,5 +147,11 @@ export class PeerLink {
     }catch{}finally{this.sampling=false;}
   }
   async route(){const stats=await this.pc.getStats();for(const r of stats.values())if(r.type==='transport'&&r.selectedCandidatePairId){const pair=stats.get(r.selectedCandidatePairId),local=stats.get(pair?.localCandidateId),remote=stats.get(pair?.remoteCandidateId);return local?.candidateType==='relay'||remote?.candidateType==='relay'?'TURN 中继':'P2P 直连';}return 'WebRTC';}
-  close(){if(this.closed)return;this.closed=true;this.ready=false;clearTimeout(this.timeout);clearTimeout(this.lost);clearTimeout(this.profileTimer);clearInterval(this.policyTimer);for(const done of [...this.waiters])done(false);for(const e of this.channels.values())for(const p of e.parts.values())clearTimeout(p.timer);this.channels.clear();this.pc.close();this.state?.('down');}
+  close(){if(this.closed)return;this.closed=true;this.ready=false;clearTimeout(this.timeout);clearTimeout(this.lost);clearTimeout(this.profileTimer);clearInterval(this.policyTimer);for(const done of [...this.waiters])done(false);for(const e of this.channels.values()){
+      // A closed channel can outlive the connection in browser event queues.
+      // Drop partial receive buffers and detach closures immediately.
+      e.c.onopen=e.c.onclose=e.c.onerror=e.c.onmessage=null;
+      for(const p of e.parts.values()){clearTimeout(p.timer);e.retained-=p.bytes.length;}
+      e.parts.clear();
+    }this.channels.clear();this.pc.close();this.state?.('down');}
 }

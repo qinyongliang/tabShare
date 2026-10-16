@@ -1,3 +1,4 @@
+import {clipboardShortcut,selectedText} from './clipboard.js';
 export class RemoteInput {
   constructor(doc,frame,send,paste){
     this.doc=doc;this.frame=frame;this.send=send;
@@ -6,7 +7,8 @@ export class RemoteInput {
     box.addEventListener('compositionend',e=>{this.composing=false;this.committed=e.data||'';setTimeout(()=>{this.committed='';},0);if(e.data)send({action:'text',text:e.data});box.value='';this.place();});
     box.addEventListener('beforeinput',e=>{if(this.composing||e.isComposing)return;if(this.committed&&e.data===this.committed){e.preventDefault();this.committed='';return;}if(e.data){e.preventDefault();send({action:'text',text:e.data});box.value='';}});
     box.addEventListener('paste',e=>{e.preventDefault();paste(e.clipboardData);});
-    for(const [event,action] of [['keydown','keyDown'],['keyup','keyUp']])box.addEventListener(event,e=>{if(e.altKey&&!e.ctrlKey&&!e.metaKey&&['ArrowLeft','ArrowRight'].includes(e.key)||e.metaKey&&!e.altKey&&['[',']'].includes(e.key)){e.preventDefault();if(event==='keydown')doc.defaultView.history.go(['ArrowLeft','['].includes(e.key)?-1:1);return;}if(e.isComposing||e.keyCode===229)return;if((e.ctrlKey||e.metaKey)&&['c','v'].includes(e.key.toLowerCase()))return;if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;e.preventDefault();send({action,key:e.key,code:e.code,keyCode:e.keyCode,modifiers:(e.altKey?1:0)|(e.ctrlKey?2:0)|(e.metaKey?4:0)|(e.shiftKey?8:0)});});
+    box.addEventListener('cut',e=>{const text=selectedText(doc,box);if(!text)return;e.preventDefault();e.clipboardData.setData('text/plain',text);box.setRangeText('',box.selectionStart,box.selectionEnd,'end');for(const action of ['keyDown','keyUp'])send({action,key:'Backspace',code:'Backspace',keyCode:8});});
+    for(const [event,action] of [['keydown','keyDown'],['keyup','keyUp']])box.addEventListener(event,e=>{if(e.altKey&&!e.ctrlKey&&!e.metaKey&&['ArrowLeft','ArrowRight'].includes(e.key)||e.metaKey&&!e.altKey&&['[',']'].includes(e.key)){e.preventDefault();if(event==='keydown')doc.defaultView.history.go(['ArrowLeft','['].includes(e.key)?-1:1);return;}if(e.isComposing||e.keyCode===229)return;if(clipboardShortcut(e))return;if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;e.preventDefault();send({action,key:e.key,code:e.code,keyCode:e.keyCode,modifiers:(e.altKey?1:0)|(e.ctrlKey?2:0)|(e.metaKey?4:0)|(e.shiftKey?8:0)});});
     doc.addEventListener('pointerdown',e=>{if(e.target!==box)this.release();},true);
     doc.addEventListener('scroll',()=>this.place(),true);
   }

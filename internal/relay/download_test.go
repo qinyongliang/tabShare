@@ -47,8 +47,12 @@ func TestDownloadBoundariesAndRecipientIsolation(t *testing.T) {
 		}
 	}
 	chunk.Offset = 64 << 20
+	if !validDownload(chunk) {
+		t.Fatal("rejected streaming file beyond 64 MiB")
+	}
+	chunk.Offset = 1<<53 - 1
 	if validDownload(chunk) {
-		t.Fatal("accepted file beyond budget")
+		t.Fatal("accepted unsafe offset overflow")
 	}
 	chunk.Offset = -1
 	if validDownload(chunk) {

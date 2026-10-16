@@ -1,3 +1,5 @@
+import {DownloadAcks} from '../extension/download-flow.js';
+import {GeolocationBroker,geolocationHook} from '../extension/geolocation.js';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {readFile} from 'node:fs/promises';
@@ -14,7 +16,7 @@ async function worker(command,clock){
     debugger:{onEvent:event('onEvent'),onDetach:event('onDetach'),sendCommand:async({tabId},method,params)=>{calls.push({tabId,method,params});return command(method,params);}},
     tabs:{onCreated:event(),onRemoved:event(),onUpdated:event()},runtime:{onMessage:event(),onStartup:event()},alarms:{create(){},onAlarm:event()}};
   class Socket{static OPEN=1;}
-  const sandbox={chrome,crypto,TextEncoder,TextDecoder,console,DocumentState,compressPacket,ResourceBridge:Bridge,installDOM,captureDOM,WebSocket:Socket,setTimeout,clearTimeout,setInterval,clearInterval,writes,...clock?.globals};
+  const sandbox={chrome,crypto,TextEncoder,TextDecoder,console,GeolocationBroker,geolocationHook,DownloadAcks,DocumentState,compressPacket,ResourceBridge:Bridge,installDOM,captureDOM,WebSocket:Socket,setTimeout,clearTimeout,setInterval,clearInterval,writes,...clock?.globals};
   vm.createContext(sandbox);vm.runInContext(source,sandbox);await vm.runInContext('boot',sandbox);
   vm.runInContext("targets.set(7,{sessions:new Set(['room']),document:new DocumentState(),mode:'dom',contextId:null,nextSend:0});socket={readyState:WebSocket.OPEN,bufferedAmount:0,send:text=>writes.push(JSON.parse(text))}",sandbox);
   return {calls,writes,target:vm.runInContext('targets.get(7)',sandbox),run:code=>vm.runInContext(code,sandbox),event:(method,params)=>listeners.onEvent[0]({tabId:7},method,params),navigate:()=>listeners.onEvent[0]({tabId:7},'Page.frameNavigated',{frame:{id:'next'}})};
@@ -83,4 +85,10 @@ test('wakeups preserve byte backpressure and reject other execution contexts or 
  clock.advance(100);assert.equal(w.run('captured.length'),0);assert.equal(w.target.wakeTimer,undefined);
  w.event('Runtime.bindingCalled',{name:'__tabShareWake',executionContextId:42,payload:JSON.stringify({version:'live',urgent:true})});
  clock.advance(399);assert.equal(w.run('captured.length'),0);clock.advance(1);assert.equal(w.run('captured[0]'),1500);
+});
+
+test('permission prompts target only the designated peer instead of broadcasting',async()=>{
+ const w=await worker(normal);
+ await w.run("peers.set('room:one',{sessionId:'room',viewerId:'one',direct:true});peers.set('room:two',{sessionId:'room',viewerId:'two',direct:true});offscreen=async message=>{writes.push(message);return true;};publish({type:'geolocation',sessionId:'room',viewerId:'one',data:'{}'});");
+ assert.equal(w.writes.length,1);assert.equal(w.writes[0].viewerId,'one');assert.equal(w.writes[0].message.type,'geolocation');
 });

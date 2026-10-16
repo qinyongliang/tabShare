@@ -1,0 +1,28 @@
+{
+  "runtime": "v24.19.0",
+  "baseline": "330b4229beaee2cb139ee82a9c48d0c9c64172a2",
+  "scope": "20,000 sparse input cache updates; inert DOM adapter, not browser latency",
+  "cases": [
+    {
+      "fields": 0,
+      "baselineMedianMs": 3.1565690000000046,
+      "optimizedMedianMs": 3.5162109999999984,
+      "baselineStyleCopies": 20000,
+      "optimizedStyleCopies": 0
+    },
+    {
+      "fields": 20,
+      "baselineMedianMs": 3.4546980000000076,
+      "optimizedMedianMs": 2.831629000000021,
+      "baselineStyleCopies": 20000,
+      "optimizedStyleCopies": 0
+    },
+    {
+      "fields": 100,
+      "baselineMedianMs": 5.577949999999987,
+      "optimizedMedianMs": 2.942295999999999,
+      "baselineStyleCopies": 20000,
+      "optimizedStyleCopies": 0
+    }
+  ]
+}

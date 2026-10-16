@@ -55,5 +55,5 @@ export class Resources {
     if(this.version&&this.version!==version){this.retired.add(this.version);this.forgetVersion(this.version);if(this.retired.size>256)this.retired.delete(this.retired.values().next().value);}
     this.version=version;this.future.delete(version);this.retired.delete(version);this.collect();
   }
-  dispose(){clearTimeout(this.notice);this.changed.clear();this.controller.abort();for(const url of this.hashes.values())URL.revokeObjectURL(url);this.urls.clear();this.hashes.clear();this.future.clear();this.retired.clear();this.pending.clear();}
+  dispose(){clearTimeout(this.notice);this.changed.clear();this.controller.abort();for(const url of this.hashes.values())URL.revokeObjectURL(url);this.urls.clear();this.hashes.clear();this.sizes.clear();this.bytes=0;this.future.clear();this.retired.clear();this.pending.clear();}
 }
