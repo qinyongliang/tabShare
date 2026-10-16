@@ -304,7 +304,7 @@ try {
   const generated=await forwardedDownload(one,()=>remoteOne.locator('#download-blob').click());assert.equal(generated.name,'generated.txt');assert.equal(Buffer.from(generated.bytes).toString(),'generated file 中文');
   console.log('PASS: GET, POST and generated Blob binary downloads stream to visitor storage without replaying requests (picker adapted)');
   const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
-  await one.locator('#share-settings-toggle').click();await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
+  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
   await until(()=>sourceMetrics().then(m=>m.width!==1440),'restore source before independent display checks');
   const nativeMetrics=await sourceMetrics();
   async function assertFits(page){await until(()=>page.evaluate(()=>{const stage=document.querySelector('#stage'),surface=document.querySelector('#surface'),style=getComputedStyle(stage),box=surface.getBoundingClientRect();return (box.width<=stage.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)+1&&box.height<=stage.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom)+1)&&document.documentElement.scrollWidth<=innerWidth;}),'shared surface fits available window');}
