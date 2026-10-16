@@ -15,7 +15,7 @@ import {Resources} from './resources.js';
 import {displayLayout,sourcePoint,viewportSize,wheelPixels} from './display.js';
 const $ = id => document.getElementById(id);
 const id=location.pathname.split('/')[2], key=shareKey(location.hash);
-let ws,retry,stopped=false,connected=false,mirror,pending=[],full=false,modeKnown=false;
+let ws,retry,stopped=false,connected=false,mirror,pending=[],full=false;
 const frame=$('mirror');
 const feedback=new SyncFeedback($('sync-feedback'),document.documentElement);
 let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTimer,lastRegionFrame;
@@ -48,7 +48,7 @@ $('advanced-settings').addEventListener('toggle',()=>settingsDrag.reflow());
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('share-settings').hidden)$('close-settings').click();});
 $('share-settings-toggle').onclick=()=>{const panel=$('share-settings');panel.hidden=!panel.hidden;$('share-settings-toggle').setAttribute('aria-expanded',String(!panel.hidden));settingsDrag.reflow();};
 for(const radio of document.querySelectorAll('[name=share-mode]'))radio.onchange=()=>input({action:'mode',mode:radio.value});
-function modeSettings(mode){if(!['dom','raster'].includes(mode))return;if(sourceMode!==mode){remoteInput.release();$('fallback').removeAttribute('src');}sourceMode=mode;full=mode==='raster';frame.hidden=full;$('fallback').hidden=!full;for(const r of document.querySelectorAll('[name=share-mode]'))r.checked=r.value===mode;}
+function modeSettings(mode){if(!['dom','raster'].includes(mode))return;if(sourceMode!==mode){scrollUpdates.clear();remoteInput.release();$('fallback-keyboard').blur();$('fallback').removeAttribute('src');}sourceMode=mode;full=mode==='raster';frame.hidden=full;$('fallback').hidden=!full;for(const r of document.querySelectorAll('[name=share-mode]'))r.checked=r.value===mode;}
 function dialogAnswer(accept){if(activeDialog)input({action:'dialog',dialogId:activeDialog.id,accept,text:$('dialog-value').value.slice(0,8192)});}
 $('dialog-answer').onsubmit=e=>{e.preventDefault();dialogAnswer(true);};$('dialog-cancel').onclick=()=>dialogAnswer(false);
 $('site-dialog').addEventListener('cancel',e=>{e.preventDefault();dialogAnswer(false);});
@@ -142,7 +142,7 @@ function receive(m,direct=false){
   if(m.type==='dialog')siteDialog(m.dialog);
   if(m.type==='popup')popupWindows.receive(m.popup);
   if(m.type==='dom')render(m.document);
-  if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;updateVideo();notify('已连接 · '+route,true);}
+  if(m.type==='mode'){modeSettings(m.mode);updateVideo();notify('已连接 · '+route,true);}
   if(m.type==='raster'){
     if(m.full&&full){$('fallback').src='data:image/jpeg;base64,'+m.data;updateVideo();}
     if(!m.full&&!full){const node=mirror?.nodes.get(m.nodeId);if(node){let image=node.querySelector('img[data-raster]');if(!image){node.replaceChildren();image=mirror.doc.createElement('img');image.dataset.raster='true';node.append(image);}regionStyle(node,image,{...m,...m.region});image.src='data:image/jpeg;base64,'+m.data;}}
@@ -196,7 +196,8 @@ function render(delta){
   const oldMeta=mirror.meta;
   if(!mirror.apply(delta)){resync();return;}
   feedback.progress(delta);
-  connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;requestFit();
+  connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;
+  if(!layout||delta.reset||delta.meta?.width!==oldMeta?.width||delta.meta?.height!==oldMeta?.height)requestFit();
   const meta=delta.meta||{};if(meta.contextMenu?.sequence!==contextSeen){contextSeen=meta.contextMenu?.sequence;if(meta.contextMenu?.custom)pageMenu.hide();}$('surface').dataset.syncing=String(!!meta.pending);modeSettings(meta.mode);updateVideo();navigation.update(meta);if(!viewportInitialized&&viewerId){viewportInitialized=true;if(autoViewport&&!viewportOwner){following=true;$('follow-viewport').checked=true;queueViewport();}}
   remoteInput.update(meta);if(regionalActive&&!regionalPointer)remoteInput.copySelection(mirror.doc,meta.selection);
   if(meta.url&&document.activeElement!==$('address'))$('address').value=meta.url;
@@ -332,6 +333,7 @@ $('fallback').addEventListener('pointerup',e=>{
   input({action:'mouseReleased',...point,clickCount:Math.min(e.detail||1,3)});
 });
 $('fallback').addEventListener('pointercancel',()=>{touchWheel();pixelTouch=null;clearTimeout(touchTimer);touchTimer=null;});
+$('fallback').addEventListener('pointerleave',e=>{if(!e.buttons)input({action:'mouseLeave'});});
 $('fallback').addEventListener('contextmenu',e=>e.preventDefault());
 $('fallback').addEventListener('wheel',e=>{e.preventDefault();const point=pixelPoint(e);if(point){const wheel=wheelPixels(e,mirror.meta.height);input({action:'mouseWheel',...point,deltaX:Math.max(-10000,Math.min(10000,wheel.deltaX/layout.scale)),deltaY:Math.max(-10000,Math.min(10000,wheel.deltaY/layout.scale))});}},{passive:false});
 const pixelKeyboard=$('fallback-keyboard');
