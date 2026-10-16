@@ -746,8 +746,8 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.clearAssets(s.live[se.ID])
 			}
 		case "raster":
-			if !m.Full && (m.Region == nil || len(m.Region.Cuts) <= 32) && m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
-				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Region: m.Region, Full: false})
+			if (m.Region == nil || len(m.Region.Cuts) <= 32) && m.Width > 0 && m.Width <= 16384 && m.Height > 0 && m.Height <= 16384 && len(m.Data) < 2<<20 && len(m.NodeID) <= 32 {
+				s.broadcast(se.ID, Message{Type: "raster", Data: m.Data, Width: m.Width, Height: m.Height, NodeID: m.NodeID, Region: m.Region, Full: m.Full})
 			}
 		case "viewport":
 			if m.Viewport == nil || (validViewport(m.Viewport.Width, m.Viewport.Height, m.Viewport.DeviceScaleFactor) && identifier.MatchString(m.Viewport.Owner)) {
@@ -755,11 +755,11 @@ func (s *Server) agentWS(w http.ResponseWriter, r *http.Request) {
 				s.broadcast(se.ID, Message{Type: "viewport", Viewport: m.Viewport})
 			}
 		case "mode":
-			if m.Mode == "dom" {
+			if m.Mode == "dom" || m.Mode == "raster" {
 				s.live[se.ID].mode = m.Mode
 			}
-			s.live[se.ID].full = false
-			s.broadcast(se.ID, Message{Type: "mode", Full: false, Mode: s.live[se.ID].mode})
+			s.live[se.ID].full = s.live[se.ID].mode == "raster"
+			s.broadcast(se.ID, Message{Type: "mode", Full: s.live[se.ID].full, Mode: s.live[se.ID].mode})
 		case "notice":
 			if len(m.Detail) <= 8192 {
 				s.broadcast(se.ID, Message{Type: "notice", Detail: m.Detail})
@@ -1016,7 +1016,7 @@ func validInput(i *Input) bool {
 		}
 		return i.NodeID != "" && n <= 8192
 	case "mode":
-		return i.Mode == "dom"
+		return i.Mode == "dom" || i.Mode == "raster"
 	case "selection":
 		return i.NodeID != "" && i.Selection != nil
 	case "dialog":

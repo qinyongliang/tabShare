@@ -136,10 +136,10 @@ function bootstrap(draggable,caretPosition,selectionState,BlobDownloads) {
     for(const type of ['transitionend','transitioncancel'])listen(root,type,e=>{mark(e.target,true);wake(true);});
   }
   function setMode(value) {
-    if(value!=='dom'||mode===value)return;
+    if(!['dom','raster'].includes(value)||mode===value)return;
     mode=value;first=true;previous.clear();sizes.clear();retainedBytes=0;truncated=false;mark(document.body,true);
-    for(const radio of widget?.shadowRoot?.querySelectorAll('input')||[])radio.checked=radio.value===mode;
-    updateWidget?.();
+    for(const radio of widgetRoot?.querySelectorAll('input')||[])radio.checked=radio.value===mode;
+    updateWidget?.();wake(true);
   }
   let updateWidget;
   function ownerUI() {
@@ -149,8 +149,11 @@ function bootstrap(draggable,caretPosition,selectionState,BlobDownloads) {
     const sheet=document.createElement('style');sheet.textContent=':host{font:14px system-ui;color:#23304a}button{font:14px system-ui;background:#335fea;color:white;border:0;border-radius:24px;padding:12px 16px;cursor:grab;user-select:none;box-shadow:0 3px 15px #0003}button:active{cursor:grabbing}.panel{position:fixed;background:white;border:1px solid #dce3ee;border-radius:14px;padding:18px;width:260px;box-sizing:border-box;max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);overflow:auto;overscroll-behavior:contain;box-shadow:0 6px 30px #0002}h3{margin:0 0 12px;font-size:16px}small{display:block;color:#64718a;line-height:1.6}';root.append(sheet);
     const section=document.createElement('section');section.className='panel';section.hidden=true;
     const heading=document.createElement('h3');heading.textContent='共享设置';
-    const note=document.createElement('small');note.textContent='DOM 差异同步，复杂内容仅使用局部视频。拖拽按钮可调整位置；浏览器调试栏可随时停止共享。';section.append(heading,note);
-    const toggle=document.createElement('button');toggle.type='button';toggle.textContent='共享设置';toggle.setAttribute('aria-label','共享设置');toggle.setAttribute('aria-expanded','false');root.append(section,toggle);
+    const note=document.createElement('small');note.textContent='所有访客共用此模式';section.append(heading);
+    const modes=document.createElement('div');modes.style.cssText='display:flex;gap:8px;margin-bottom:12px';
+    for(const [value,label] of [['dom','DOM'],['raster','WebRTC']]){const item=document.createElement('label'),radio=document.createElement('input');radio.type='radio';radio.name='share-mode';radio.value=value;radio.checked=value===mode;radio.onchange=()=>setMode(value);item.append(radio,document.createTextNode(label));modes.append(item);}
+    section.append(modes,note);
+    const toggle=document.createElement('button');toggle.type='button';toggle.textContent='◈ 共享';toggle.setAttribute('aria-label','共享设置');toggle.setAttribute('aria-expanded','false');root.append(section,toggle);
     const panel=root.querySelector('section'),button=root.querySelector('button');
     document.documentElement.append(widget);widgetDrag=draggable(button,panel,widget,()=>({width:Math.min(innerWidth,ownerViewport?.width||innerWidth),height:Math.min(innerHeight,ownerViewport?.height||innerHeight)}));
     button.onclick=()=>{panel.hidden=!panel.hidden;button.setAttribute('aria-expanded',String(!panel.hidden));widgetDrag.reflow();};
@@ -307,6 +310,7 @@ function bootstrap(draggable,caretPosition,selectionState,BlobDownloads) {
     return {x:Math.max(0,Math.min(innerWidth-1,r.left+r.width*(input.x??.5))),y:Math.max(0,Math.min(innerHeight-1,r.top+r.height*(input.y??.5))),...(link?{download:{url:link.href,name:link.download}}:{})};
   }
   function fallback() {
+    if(mode==='raster')return {mode,full:true,regions:[],width:innerWidth,height:innerHeight};
     const regions=[];
     for(const [id,node] of nodes){
       if(node.nodeType!==1||!node.isConnected||!previous.has(id))continue;

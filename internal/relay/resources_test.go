@@ -72,12 +72,12 @@ func TestCompatibilityInputValidation(t *testing.T) {
 	if !validInput(&Input{Action: "mouseLeave"}) || validInput(&Input{Action: "mouseLeave", NodeID: "3"}) {
 		t.Fatal("invalid mouse leave validation")
 	}
-	for _, input := range []*Input{{Action: "mode", Mode: "dom"}, {Action: "history", EntryID: 42}, {Action: "dialog", DialogID: randomID()}, {Action: "selection", NodeID: "3", Selection: &Selection{Anchor: "4", Focus: "5", AnchorOffset: 1, FocusOffset: 2}}} {
+	for _, input := range []*Input{{Action: "mode", Mode: "dom"}, {Action: "mode", Mode: "raster"}, {Action: "history", EntryID: 42}, {Action: "dialog", DialogID: randomID()}, {Action: "selection", NodeID: "3", Selection: &Selection{Anchor: "4", Focus: "5", AnchorOffset: 1, FocusOffset: 2}}} {
 		if !validInput(input) {
 			t.Errorf("rejected %+v", input)
 		}
 	}
-	for _, input := range []*Input{{Action: "mode", Mode: "javascript"}, {Action: "mode", Mode: "raster"}, {Action: "history", EntryID: 0}, {Action: "history", EntryID: -1}, {Action: "history", EntryID: 2147483648}, {Action: "dialog", DialogID: "invalid"}, {Action: "selection", NodeID: "3", Selection: &Selection{AnchorOffset: -1}}, {Action: "select", NodeID: "3", Values: make([]string, 129)}} {
+	for _, input := range []*Input{{Action: "mode", Mode: "javascript"}, {Action: "mode", Mode: "unknown"}, {Action: "history", EntryID: 0}, {Action: "history", EntryID: -1}, {Action: "history", EntryID: 2147483648}, {Action: "dialog", DialogID: "invalid"}, {Action: "selection", NodeID: "3", Selection: &Selection{AnchorOffset: -1}}, {Action: "select", NodeID: "3", Values: make([]string, 129)}} {
 		if validInput(input) {
 			t.Errorf("accepted %+v", input)
 		}

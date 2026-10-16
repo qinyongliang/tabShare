@@ -1,3 +1,4 @@
+import {Coalescer} from './coalescer.js';
 import {SyncFeedback} from './feedback.js';
 import {VisitorGeolocation} from './geolocation.js';
 import {pasteImage,textPastePackets,clipboardShortcut,selectedText} from './clipboard.js';
@@ -14,7 +15,7 @@ import {Resources} from './resources.js';
 import {displayLayout,sourcePoint,viewportSize,wheelPixels} from './display.js';
 const $ = id => document.getElementById(id);
 const id=location.pathname.split('/')[2], key=shareKey(location.hash);
-let ws,retry,stopped=false,connected=false,mirror,pending=[],scrollTimer,scrollNode,scrollRoot=false,full=false,modeKnown=false;
+let ws,retry,stopped=false,connected=false,mirror,pending=[],full=false,modeKnown=false;
 const frame=$('mirror');
 const feedback=new SyncFeedback($('sync-feedback'),document.documentElement);
 let peer,peerReady=false,videoInfo,route='WebSocket 兜底',videoTick,regionTimer,lastRegionFrame;
@@ -42,9 +43,12 @@ $('fullscreen').onclick=async()=>{
 document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)exitImmersive();else requestFit();});
 $('close-popup').onclick=()=>input({action:'closePopup'});
 const settingsDrag=draggable($('share-settings-toggle'),$('share-settings'));
+$('close-settings').onclick=()=>{$('share-settings').hidden=true;$('share-settings-toggle').setAttribute('aria-expanded','false');$('share-settings-toggle').focus();};
+$('advanced-settings').addEventListener('toggle',()=>settingsDrag.reflow());
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('share-settings').hidden)$('close-settings').click();});
 $('share-settings-toggle').onclick=()=>{const panel=$('share-settings');panel.hidden=!panel.hidden;$('share-settings-toggle').setAttribute('aria-expanded',String(!panel.hidden));settingsDrag.reflow();};
 for(const radio of document.querySelectorAll('[name=share-mode]'))radio.onchange=()=>input({action:'mode',mode:radio.value});
-function modeSettings(mode){if(!['dom','raster'].includes(mode))return;sourceMode=mode;for(const r of document.querySelectorAll('[name=share-mode]'))r.checked=r.value===mode;}
+function modeSettings(mode){if(!['dom','raster'].includes(mode))return;if(sourceMode!==mode){remoteInput.release();$('fallback').removeAttribute('src');}sourceMode=mode;full=mode==='raster';frame.hidden=full;$('fallback').hidden=!full;for(const r of document.querySelectorAll('[name=share-mode]'))r.checked=r.value===mode;}
 function dialogAnswer(accept){if(activeDialog)input({action:'dialog',dialogId:activeDialog.id,accept,text:$('dialog-value').value.slice(0,8192)});}
 $('dialog-answer').onsubmit=e=>{e.preventDefault();dialogAnswer(true);};$('dialog-cancel').onclick=()=>dialogAnswer(false);
 $('site-dialog').addEventListener('cancel',e=>{e.preventDefault();dialogAnswer(false);});
@@ -52,15 +56,20 @@ function siteDialog(value){activeDialog=value;if(!value){$('site-dialog').close(
 const modifiers=e=>(e.altKey?1:0)|(e.ctrlKey?2:0)|(e.metaKey?4:0)|(e.shiftKey?8:0);
 function send(m){if(ws?.readyState===WebSocket.OPEN)ws.send(JSON.stringify(m));}
 const navigation=new SharedNavigation(window,key,m=>input(m));
-function input(m){if(connected){if(['mouseReleased','navigate','reload','back','forward','history','select'].includes(m.action))m={...m,requestId:feedback.begin()};if(m.nodeId||['text','keyDown','keyUp','mouseMoved','mouseLeave','mousePressed','mouseReleased','mouseWheel','scroll','select','selection'].includes(m.action))m={version:mirror?.version,...m};if(peerReady)void peer.send({type:'input',input:m},'input');else send({type:'input',input:m});}}
+function input(m){if(connected){if(['mouseReleased','navigate','reload','back','forward','history','select','mode'].includes(m.action))m={...m,requestId:feedback.begin()};if(m.nodeId||['text','keyDown','keyUp','mouseMoved','mouseLeave','mousePressed','mouseReleased','mouseWheel','scroll','select','selection'].includes(m.action))m={version:mirror?.version,...m};if(peerReady)void peer.send({type:'input',input:m},'input');else send({type:'input',input:m});}}
 const pageMenu=contextMenu(document,{navigate:url=>input({action:'navigate',url}),reload:()=>input({action:'reload'}),error:error=>notify(error.message,true)});
 const remoteInput=new RemoteInput(document,frame,m=>input(m),data=>{const image=[...data.files].find(f=>/^image\/(png|jpeg|gif|webp)$/.test(f.type));if(image)void pasteImage(image,{session:id,key,viewerId,peer:peerReady?peer:null,selection:{version:mirror.version,nodeId:''}}).catch(e=>notify(e.message,true));else try{for(const packet of textPastePackets(data.getData('text/plain')))input(packet);}catch(e){notify(e.message,true);}});
 let regionalPointer,regionalActive=false;
+const scrollUpdates=new Coalescer((nodeId,position)=>{
+  const state=nodeId==='root'?{scrollTop:mirror?.meta?.scrollY||0,scrollLeft:mirror?.meta?.scrollX||0}:mirror?.states.get(nodeId);
+  if(state&&state.scrollTop===position.scrollTop&&state.scrollLeft===position.scrollLeft)return;
+  input({action:'scroll',nodeId,...position});
+});
 function resync(){if(peerReady)void peer.send({type:'resync'},'input');else send({type:'resync'});}
 function updateVideo(){
-  const live=peerReady&&video.readyState>=2&&!video.paused;
-  video.hidden=!full||!live;$('fallback').style.opacity=full&&live?'0':'1';
-  const note=full?(live?'WebRTC 画面 · 点击、输入和滚动作用于源标签页':'应急画面 · 点击、输入和滚动作用于源标签页'):'DOM 差异同步 · 可选择文字、复制和操作表单';
+  const live=peerReady&&video.readyState>=2&&!video.paused&&videoInfo?.full===full;
+  video.hidden=!full||!live;$('fallback').style.opacity=live||!$('fallback').hasAttribute('src')?'0':'1';
+  const note=full?(live?'实时视频 · 完整画面':'视频连接中 · 自动兜底'):'原生文字 · 可选择与复制';
   if($('render-note').textContent!==note)$('render-note').textContent=note;
 }
 function regionStyle(node,media,region){
@@ -119,7 +128,7 @@ function receive(m,direct=false){
   if(m.type==='geolocation'){try{visitorLocation.receive(JSON.parse(m.data));}catch{}return;}
   if(!direct&&peerReady&&['dom','raster','resource','resources'].includes(m.type))return;
   if(m.type==='signal'){if(typeof RTCPeerConnection==='function')void signaling(m.signal).catch(()=>{route='WebSocket 兜底';});return;}
-  if(m.type==='video'){videoInfo=m.info;full=false;frame.hidden=false;$('fallback').hidden=true;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();sendProfile();return;}
+  if(m.type==='video'){videoInfo=m.info;clearInterval(regionTimer);lastRegionFrame=null;if(!m.info.full&&m.info.regions?.length)regionTimer=setInterval(drawRegions,33);updateVideo();drawRegions();sendProfile();return;}
   if(m.type==='ice')rtcServers=m.iceServers||[];
   if(m.type==='joined'){viewerId=m.viewerId;rtcServers=m.iceServers||[];autoViewport=!!m.autoViewport;lastViewport=null;queueViewport();}
   if(m.type==='viewport')sharedViewport(m.viewport);
@@ -133,9 +142,10 @@ function receive(m,direct=false){
   if(m.type==='dialog')siteDialog(m.dialog);
   if(m.type==='popup')popupWindows.receive(m.popup);
   if(m.type==='dom')render(m.document);
-  if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;full=false;frame.hidden=false;$('fallback').hidden=true;updateVideo();notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);}
+  if(m.type==='mode'){modeSettings(m.mode);modeKnown=true;updateVideo();notify('已连接 · '+route,true);}
   if(m.type==='raster'){
-    if(!m.full){const node=mirror?.nodes.get(m.nodeId);if(node){let image=node.querySelector('img[data-raster]');if(!image){node.replaceChildren();image=mirror.doc.createElement('img');image.dataset.raster='true';node.append(image);}regionStyle(node,image,{...m,...m.region});image.src='data:image/jpeg;base64,'+m.data;}}
+    if(m.full&&full){$('fallback').src='data:image/jpeg;base64,'+m.data;updateVideo();}
+    if(!m.full&&!full){const node=mirror?.nodes.get(m.nodeId);if(node){let image=node.querySelector('img[data-raster]');if(!image){node.replaceChildren();image=mirror.doc.createElement('img');image.dataset.raster='true';node.append(image);}regionStyle(node,image,{...m,...m.region});image.src='data:image/jpeg;base64,'+m.data;}}
   }
   if(m.type==='status'&&m.status!=='connected'){if(m.status==='closed'&&new URLSearchParams(location.search).has('popup'))window.close();connected=false;notify(m.detail||'等待共享页面');$('detail').textContent=m.detail||'等待共享浏览器连接。';$('empty').hidden=false;$('surface').hidden=true;$('display-area').hidden=true;}
 }
@@ -163,7 +173,7 @@ function queueViewport(){
 function sharedViewport(viewport){
   if(viewport&&viewport.owner!==viewerId||!viewport&&viewportOwner===viewerId){following=false;$('follow-viewport').checked=false;clearTimeout(viewportTimer);queuedViewport=null;lastViewport=null;}
   viewportOwner=viewport?.owner;
-  $('viewport-note').textContent=viewport?viewport.owner===viewerId?'共享视口跟随我的窗口，其他访客共用此布局。':'共享视口已由另一位访客调整；勾选可切换为我的窗口。':'此项会调整源网页布局，所有访客共同使用。';
+  $('viewport-note').textContent=viewport?viewport.owner===viewerId?'正在跟随我的窗口':'其他访客正在调整视口':'所有访客共用网页布局';
 }
 function fit(){
   $('stage').dataset.pan=String(['width','actual','custom'].includes(display.mode));
@@ -182,17 +192,17 @@ function fit(){
 }
 function render(delta){
   if(!mirror){pending.push(delta);return;}
-  if(delta.reset&&delta.version!==mirror.version){if(mirror.version)visitorLocation.reset();resources.keepVersion(delta.version);remoteInput.release();regionalActive=false;regionalPointer=null;}
+  if(delta.reset&&delta.version!==mirror.version){if(mirror.version)visitorLocation.reset();resources.keepVersion(delta.version);scrollUpdates.clear();remoteInput.release();regionalActive=false;regionalPointer=null;}
   const oldMeta=mirror.meta;
   if(!mirror.apply(delta)){resync();return;}
   feedback.progress(delta);
-  connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;fit();
-  const meta=delta.meta||{};if(meta.contextMenu?.sequence!==contextSeen){contextSeen=meta.contextMenu?.sequence;if(meta.contextMenu?.custom)pageMenu.hide();}$('surface').dataset.syncing=String(!!meta.pending);modeSettings(meta.mode);navigation.update(meta);if(!viewportInitialized&&viewerId){viewportInitialized=true;if(autoViewport&&!viewportOwner){following=true;$('follow-viewport').checked=true;queueViewport();}}
+  connected=true;$('display-area').hidden=false;$('surface').hidden=false;$('empty').hidden=true;requestFit();
+  const meta=delta.meta||{};if(meta.contextMenu?.sequence!==contextSeen){contextSeen=meta.contextMenu?.sequence;if(meta.contextMenu?.custom)pageMenu.hide();}$('surface').dataset.syncing=String(!!meta.pending);modeSettings(meta.mode);updateVideo();navigation.update(meta);if(!viewportInitialized&&viewerId){viewportInitialized=true;if(autoViewport&&!viewportOwner){following=true;$('follow-viewport').checked=true;queueViewport();}}
   remoteInput.update(meta);if(regionalActive&&!regionalPointer)remoteInput.copySelection(mirror.doc,meta.selection);
   if(meta.url&&document.activeElement!==$('address'))$('address').value=meta.url;
   if(typeof meta.title==='string')document.title=meta.title||meta.url||'共享标签页';
   if(delta.reset||meta.scrollX!==oldMeta?.scrollX||meta.scrollY!==oldMeta?.scrollY)frame.contentWindow.scrollTo(meta.scrollX||0,meta.scrollY||0);
-  notify('已连接 · '+(full?'WebRTC 画面 · ':'DOM 差异 · ')+route,true);
+  notify('已连接 · '+route,true);
 }
 function connect(){
   if(stopped)return;
@@ -204,13 +214,13 @@ function connect(){
     receive(JSON.parse(event.data));
   };
   connection.onclose=event=>{
-    if(ws!==connection)return;feedback.disconnect();visitorLocation.reset();void downloads.dispose();downloads=new Downloads(document,text=>notify(text,true));peer?.close();peer=null;peerReady=false;video.srcObject=null;if(stopped)return;connected=false;
+    if(ws!==connection)return;feedback.disconnect();scrollUpdates.clear();visitorLocation.reset();void downloads.dispose();downloads=new Downloads(document,text=>notify(text,true));peer?.close();peer=null;peerReady=false;video.srcObject=null;if(stopped)return;connected=false;
     if(event.code===1008){stopped=true;if(new URLSearchParams(location.search).has('popup'))window.close();notify('分享已撤销，或链接密钥不正确');return;}
     notify('连接已断开，正在重连…');retry=setTimeout(connect,3000);
   };connection.onerror=()=>{};
 }
 $('retry').onclick=()=>{if(stopped){stopped=false;downloads=new Downloads(document,text=>notify(text,true));connect();}else if(ws?.readyState===WebSocket.OPEN)send({type:'retry'});else{clearTimeout(retry);const old=ws;ws=null;old?.close();connect();}};
-$('leave').onclick=()=>{feedback.disconnect();visitorLocation.reset();void downloads.dispose();stopped=true;connected=false;clearInterval(regionTimer);peer?.close();peer=null;peerReady=false;clearTimeout(retry);ws?.close();$('surface').hidden=true;$('display-area').hidden=true;$('empty').hidden=false;$('detail').textContent='已断开此访客。';notify('访问已断开');};
+$('leave').onclick=()=>{feedback.disconnect();scrollUpdates.clear();visitorLocation.reset();void downloads.dispose();stopped=true;connected=false;clearInterval(regionTimer);peer?.close();peer=null;peerReady=false;clearTimeout(retry);ws?.close();$('surface').hidden=true;$('display-area').hidden=true;$('empty').hidden=false;$('detail').textContent='已断开此访客。';notify('访问已断开');};
 $('reload').onclick=()=>input({action:'reload'});
 $('navigation').onsubmit=e=>{e.preventDefault();try{const u=new URL($('address').value);if(!['http:','https:'].includes(u.protocol))throw new Error();input({action:'navigate',url:u.href});}catch{notify('请输入完整的 HTTP(S) 网址');}};
 let pointerForwarder;
@@ -280,14 +290,10 @@ function attach(){
   },true);
   doc.addEventListener('change',e=>{if(e.target.tagName==='SELECT')input({action:'select',nodeId:e.target.dataset.nodeId,text:e.target.value,values:[...e.target.selectedOptions].map(o=>o.value)});},true);
   doc.addEventListener('scroll',e=>{
-    const root=e.target===doc;scrollNode=root?doc.scrollingElement:e.target;scrollRoot=root;clearTimeout(scrollTimer);
-    scrollTimer=setTimeout(()=>{if(scrollRoot&&scrollNode.scrollTop===(mirror.meta.scrollY||0)&&scrollNode.scrollLeft===(mirror.meta.scrollX||0))return;input({action:'scroll',nodeId:scrollRoot?'root':scrollNode.dataset.nodeId,scrollTop:scrollNode.scrollTop,scrollLeft:scrollNode.scrollLeft});},100);
+    const root=e.target===doc,node=root?doc.scrollingElement:e.target,nodeId=root?'root':node.dataset?.nodeId;
+    if(nodeId)scrollUpdates.push(nodeId,{scrollTop:node.scrollTop,scrollLeft:node.scrollLeft});
   },true);
-  frame.contentWindow.addEventListener('scroll',()=>{
-    const x=frame.contentWindow.scrollX,y=frame.contentWindow.scrollY;
-    clearTimeout(scrollTimer);
-    scrollTimer=setTimeout(()=>{if(x!==(mirror.meta.scrollX||0)||y!==(mirror.meta.scrollY||0))input({action:'scroll',nodeId:'root',scrollTop:y,scrollLeft:x});},100);
-  });
+  frame.contentWindow.addEventListener('scroll',()=>scrollUpdates.push('root',{scrollTop:frame.contentWindow.scrollY,scrollLeft:frame.contentWindow.scrollX}));
   for(const d of pending)render(d);pending=[];
 }
 frame.addEventListener('load',attach);
@@ -296,7 +302,7 @@ new ResizeObserver(requestFit).observe($('stage'));
 let dprQuery;function dprChanged(){dprQuery?.removeEventListener('change',dprChanged);dprQuery=matchMedia('(resolution: '+window.devicePixelRatio+'dppx)');dprQuery.addEventListener('change',dprChanged);requestFit();}dprChanged();
 window.addEventListener('resize',requestFit);window.visualViewport?.addEventListener('resize',requestFit);window.visualViewport?.addEventListener('scroll',requestFit);
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
-window.addEventListener('pagehide',()=>{feedback.disconnect();stopped=true;clearInterval(regionTimer);peer?.close();video.srcObject=null;resources.dispose();downloads.dispose();ws?.close();});
+window.addEventListener('pagehide',()=>{feedback.disconnect();scrollUpdates.clear();stopped=true;clearInterval(regionTimer);peer?.close();video.srcObject=null;resources.dispose();downloads.dispose();ws?.close();});
 connect();
 const pixelPoint=e=>{const point=sourcePoint(e,$('fallback').getBoundingClientRect(),mirror?.meta);return point?{...point,button:['left','middle','right'][e.button]||'none',buttons:e.buttons,modifiers:modifiers(e)}:null;};
 let pixelMove=0,pixelTouch,touchTimer;
@@ -329,8 +335,10 @@ $('fallback').addEventListener('pointercancel',()=>{touchWheel();pixelTouch=null
 $('fallback').addEventListener('contextmenu',e=>e.preventDefault());
 $('fallback').addEventListener('wheel',e=>{e.preventDefault();const point=pixelPoint(e);if(point){const wheel=wheelPixels(e,mirror.meta.height);input({action:'mouseWheel',...point,deltaX:Math.max(-10000,Math.min(10000,wheel.deltaX/layout.scale)),deltaY:Math.max(-10000,Math.min(10000,wheel.deltaY/layout.scale))});}},{passive:false});
 const pixelKeyboard=$('fallback-keyboard');
-pixelKeyboard.addEventListener('beforeinput',e=>{if(!e.isComposing&&e.data){e.preventDefault();input({action:'text',text:e.data});}});
-pixelKeyboard.addEventListener('compositionend',e=>{if(e.data)input({action:'text',text:e.data});pixelKeyboard.value='';});
-for(const [event,action] of [['keydown','keyDown'],['keyup','keyUp']])pixelKeyboard.addEventListener(event,e=>{if(e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;e.preventDefault();input({action,key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});});
+let pixelCommitted='';
+pixelKeyboard.addEventListener('paste',e=>{e.preventDefault();try{for(const packet of textPastePackets(e.clipboardData.getData('text/plain')))input(packet);}catch(error){notify(error.message,true);}});
+pixelKeyboard.addEventListener('beforeinput',e=>{if(pixelCommitted&&e.data===pixelCommitted){e.preventDefault();pixelCommitted='';return;}if(!e.isComposing&&e.data){e.preventDefault();input({action:'text',text:e.data});}});
+pixelKeyboard.addEventListener('compositionend',e=>{pixelCommitted=e.data||'';setTimeout(()=>{pixelCommitted='';},0);if(e.data)input({action:'text',text:e.data});pixelKeyboard.value='';});
+for(const [event,action] of [['keydown','keyDown'],['keyup','keyUp']])pixelKeyboard.addEventListener(event,e=>{if(clipboardShortcut(e))return;if(e.isComposing||e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)return;e.preventDefault();input({action,key:e.key,code:e.code,keyCode:e.keyCode,modifiers:modifiers(e)});});
 
 window.addEventListener('pagehide',()=>visitorLocation.reset());

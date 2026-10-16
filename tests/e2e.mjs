@@ -216,9 +216,33 @@ try {
     const {runRealSites}=await import('./real-sites.mjs');
     await runRealSites({root,request,view,cdp,chrome,getTabs,sessions,packets,videoGeometries,errors,commandFailures,resourceReads});
   }else{
-  async function navigate(page,url){if(!await page.locator('#share-settings').isVisible())await page.locator('#share-settings-toggle').click();await page.locator('#address').fill(url);await page.locator('#address').press('Enter');await page.locator('#share-settings-toggle').click();}
+  async function navigate(page,url){if(!await page.locator('#share-settings').isVisible())await page.locator('#share-settings-toggle').click();await page.locator('#advanced-settings').evaluate(node=>{node.open=true;});await page.locator('#address').fill(url);await page.locator('#advanced-settings').evaluate(node=>{node.open=true;});await page.locator('#address').press('Enter');await page.locator('#share-settings-toggle').click();}
   const one = await view(share.value.shareUrl);
   const two = await view(share.value.shareUrl);
+  // Exercise the actual mode protocol through the UI on both relay and RTC runs.
+  await one.locator('#share-settings-toggle').click();
+  assert.equal(await one.locator('#advanced-settings').evaluate(n=>n.open),false,'secondary controls start collapsed');
+  await mkdir(path.join(root,'test-results'),{recursive:true});
+  await one.screenshot({path:path.join(root,'test-results','compact-settings-'+(rtcEnabled?'rtc':'relay')+'.png')});
+  await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:`(()=>{const b=document.createElement('button');b.id='mode-probe';b.textContent='Video input probe';b.style.cssText='position:fixed;left:20px;top:20px;z-index:2147483646;width:160px;height:40px';b.onclick=()=>{globalThis.__modeProbeClicks=(globalThis.__modeProbeClicks||0)+1;};document.body.append(b);})()`});
+  for(let round=0;round<2;round++){
+    await one.locator('[name=share-mode][value=raster]').check();
+    await until(()=>two.locator('[name=share-mode][value=raster]').isChecked(),'mode is authoritative across viewers');
+    await until(()=>one.locator('#mirror').isHidden(),'DOM surface hidden in video mode');
+    if(rtcEnabled)await until(()=>one.locator('#stream').evaluate(v=>!v.hidden&&v.readyState>=2&&v.videoWidth>0),'full WebRTC video becomes live');
+    else await until(()=>one.locator('#fallback').evaluate(v=>!v.hidden&&v.complete&&v.naturalWidth>0),'full frame relay fallback becomes live');
+    const surface=await one.locator('#fallback').boundingBox(),dimensions=await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight})',returnByValue:true}).then(r=>r.result.value);
+    await one.mouse.click(surface.x+100*surface.width/dimensions.width,surface.y+40*surface.height/dimensions.height);
+    await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'globalThis.__modeProbeClicks',returnByValue:true}).then(r=>r.result.value===round+1),'video coordinates reach the real tab');
+    await one.locator('[name=share-mode][value=dom]').check();
+    await until(()=>one.locator('#mirror').isVisible(),'DOM mode restored');
+    await until(()=>two.locator('[name=share-mode][value=dom]').isChecked(),'other viewer returns to DOM');
+    await one.frameLocator('#mirror').locator('#mode-probe').waitFor();
+  }
+  await chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"document.querySelector('#mode-probe').remove()"});
+  await one.locator('#close-settings').click();
+  assert.equal(await one.locator('#share-settings-toggle').getAttribute('aria-expanded'),'false');
+  console.log('PASS: compact panel, repeated DOM/video switching, multi-viewer state and real pixel input');
   await until(()=>one.locator('#follow-viewport').isChecked(),'first viewer automatically drives full-window layout');
   const sourceViewport=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight})',returnByValue:true}).then(r=>r.result.value);
   async function noOuterScrollbars(page){return page.evaluate(()=>{const s=document.querySelector('#stage'),f=document.querySelector('#mirror'),root=f.contentDocument.scrollingElement;return getComputedStyle(s).overflow==='hidden'&&s.scrollHeight===s.clientHeight&&s.scrollWidth===s.clientWidth&&document.documentElement.scrollHeight===innerHeight&&root.scrollHeight>root.clientHeight;});}
@@ -304,7 +328,7 @@ try {
   const generated=await forwardedDownload(one,()=>remoteOne.locator('#download-blob').click());assert.equal(generated.name,'generated.txt');assert.equal(Buffer.from(generated.bytes).toString(),'generated file 中文');
   console.log('PASS: GET, POST and generated Blob binary downloads stream to visitor storage without replaying requests (picker adapted)');
   const sourceMetrics=()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:'({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,scroll:scrollY})',returnByValue:true}).then(r=>r.result.value);
-  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
+  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#advanced-settings').evaluate(node=>{node.open=true;});await one.locator('#restore-viewport').click();await one.locator('#share-settings-toggle').click();
   await until(()=>sourceMetrics().then(m=>m.width!==1440),'restore source before independent display checks');
   const nativeMetrics=await sourceMetrics();
   async function assertFits(page){await until(()=>page.evaluate(()=>{const stage=document.querySelector('#stage'),surface=document.querySelector('#surface'),style=getComputedStyle(stage),box=surface.getBoundingClientRect();return (box.width<=stage.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)+1&&box.height<=stage.clientHeight-parseFloat(style.paddingTop)-parseFloat(style.paddingBottom)+1)&&document.documentElement.scrollWidth<=innerWidth;}),'shared surface fits available window');}
@@ -317,23 +341,23 @@ try {
   await one.locator('#display-sizing').selectOption('width');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollHeight>e.clientHeight;}),'fit-width allows local vertical pan');
   await one.locator('#display-sizing').selectOption('actual');await until(()=>one.evaluate(()=>{const e=document.querySelector('#stage');return e.scrollWidth>e.clientWidth&&Number(document.querySelector('#surface').dataset.scale)===1;}),'original size allows horizontal and vertical pan');
   assert.notEqual(await one.locator('#surface').getAttribute('data-scale'),await two.locator('#surface').getAttribute('data-scale'),'visitors have independent display settings');
-  await one.locator('#display-zoom').fill('150');assert.equal(await one.locator('#display-sizing').inputValue(),'custom');await until(()=>one.locator('#surface').getAttribute('data-scale').then(s=>s==='1.5'),'custom zoom');
+  await one.locator('#advanced-settings').evaluate(node=>{node.open=true;});await one.locator('#display-zoom').fill('150');assert.equal(await one.locator('#display-sizing').inputValue(),'custom');await until(()=>one.locator('#surface').getAttribute('data-scale').then(s=>s==='1.5'),'custom zoom');
   await one.locator('#display-sizing').selectOption('fit');await one.locator('#share-settings-toggle').click();await one.setViewportSize({width:390,height:844});await assertFits(one);
   await one.bringToFront();await one.locator('#share-settings-toggle').click();await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!!document.fullscreenElement),'fullscreen enters').catch(async error=>{console.log('Fullscreen state:',await one.evaluate(()=>({enabled:document.fullscreenEnabled,visible:document.visibilityState,status:document.querySelector('#status').textContent})));throw error;});await assertFits(one);await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>!document.fullscreenElement),'fullscreen exits');
   await one.evaluate(()=>Object.defineProperty(document,'fullscreenEnabled',{configurable:true,value:false}));await one.locator('#fullscreen').click();await until(()=>one.evaluate(()=>document.body.classList.contains('immersive')&&!document.fullscreenElement),'browser without fullscreen uses immersive display');await assertFits(one);await one.locator('#fullscreen').click();await one.evaluate(()=>{delete document.fullscreenEnabled;});
-  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#follow-viewport').check();
+  if(!await one.locator('#share-settings').isVisible())await one.locator('#share-settings-toggle').click();await one.locator('#advanced-settings').evaluate(node=>{node.open=true;});await one.locator('#follow-viewport').check();
   await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.height>=240;},'shared viewport adapts source layout');
   await until(()=>remoteTwo.locator('#responsive').evaluate(e=>getComputedStyle(e).backgroundColor==='rgb(210, 240, 220)'),'responsive CSS is computed on source and shared with other viewers');
-  const followedSize=await sourceMetrics();await one.locator('#display-zoom').fill('150');await new Promise(resolve=>setTimeout(resolve,650));assert.equal((await sourceMetrics()).width,followedSize.width,'local zoom does not resize shared layout');await one.locator('#display-sizing').selectOption('fit');
+  const followedSize=await sourceMetrics();await one.locator('#advanced-settings').evaluate(node=>{node.open=true;});await one.locator('#display-zoom').fill('150');await new Promise(resolve=>setTimeout(resolve,650));assert.equal((await sourceMetrics()).width,followedSize.width,'local zoom does not resize shared layout');await one.locator('#display-sizing').selectOption('fit');
   const beforeSmall=state.clicks;await one.locator('#share-settings-toggle').click();await remoteOne.locator('#click').click();await until(()=>state.clicks===beforeSmall+1,'click after real source reflow');
-  await two.locator('#share-settings-toggle').click();await two.locator('#follow-viewport').check();await until(async()=>(await sourceMetrics()).width>1000,'second viewer takes viewport control');
+  await two.locator('#share-settings-toggle').click();await two.locator('#advanced-settings').evaluate(node=>{node.open=true;});await two.locator('#follow-viewport').check();await until(async()=>(await sourceMetrics()).width>1000,'second viewer takes viewport control');
   await until(()=>one.locator('#follow-viewport').isChecked().then(v=>!v),'old driver stops following');
   const secondSize=await sourceMetrics();await one.setViewportSize({width:844,height:390});await new Promise(resolve=>setTimeout(resolve,800));assert.equal((await sourceMetrics()).width,secondSize.width,'old viewer resizing cannot overwrite new driver');
-  await two.locator('#restore-viewport').click();await until(async()=>(await sourceMetrics()).width===nativeMetrics.width,'explicit source viewport restore');await two.locator('#share-settings-toggle').click();
+  await two.locator('#advanced-settings').evaluate(node=>{node.open=true;});await two.locator('#restore-viewport').click();await until(async()=>(await sourceMetrics()).width===nativeMetrics.width,'explicit source viewport restore');await two.locator('#share-settings-toggle').click();
   // Real mobile input and high DPI: bitmap coordinates remain source CSS pixels.
   const phoneContext=await visitors.newContext({viewport:{width:390,height:844},deviceScaleFactor:2,hasTouch:true,isMobile:true});
   const phone=await view(share.value.shareUrl,phoneContext);await assertFits(phone);
-  await phone.locator('#share-settings-toggle').click();await phone.locator('#follow-viewport').check();await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'high-DPI source viewport');
+  await phone.locator('#share-settings-toggle').click();await phone.locator('#advanced-settings').evaluate(node=>{node.open=true;});await phone.locator('#follow-viewport').check();await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'high-DPI source viewport');
   await phone.setViewportSize({width:844,height:390});await until(async()=>(await sourceMetrics()).width>600,'driving viewer rotation updates source width');
   await until(()=>chrome.debugger.sendCommand({tabId:tab.id},'Runtime.evaluate',{expression:"screen.orientation.type==='landscape-primary'",returnByValue:true}).then(r=>r.result.value),'source orientation follows driving viewer');
   await phone.setViewportSize({width:390,height:844});await until(async()=>{const m=await sourceMetrics();return m.width<600&&m.dpr===2;},'driving viewer rotates back');

@@ -74,7 +74,7 @@ export function validPeerInput(i) {
     case 'text':return typeof i.text==='string'&&i.text.length>0;
     case 'scroll':return !!i.nodeId&&bounded(i.scrollTop??0,0,10000000)&&bounded(i.scrollLeft??0,0,10000000);
     case 'select':return !!i.nodeId&&Array.isArray(i.values)&&i.values.length<=128&&i.values.every(v=>typeof v==='string')&&new TextEncoder().encode(i.values.join('')).length<=8192;
-    case 'mode':return i.mode==='dom';
+    case 'mode':return ['dom','raster'].includes(i.mode);
     case 'selection':return !!i.nodeId&&!!i.selection;
     case 'dialog':return /^[A-Za-z0-9_-]{8,80}$/.test(i.dialogId||'');
     case 'viewport':return Number.isInteger(i.width)&&Number.isInteger(i.height)&&bounded(i.width,320,3840)&&bounded(i.height,240,2160)&&bounded(i.deviceScaleFactor,1,2)&&i.width*i.deviceScaleFactor<=4096&&i.height*i.deviceScaleFactor<=4096&&i.width*i.height*i.deviceScaleFactor**2<=8294400;

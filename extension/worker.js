@@ -423,7 +423,10 @@ async function raster(tabId) {
     if(target.videoGeometry!==geometry){target.videoGeometry=geometry;for(const id of target.sessions)publish({type:'video',sessionId:id,info});}
     if(direct&&! [...target.sessions].some(id=>roomPeers(id).some(p=>!p.direct))){target.nextRaster=Date.now()+200;return;}
     let bytes=0;
-    if(info.regions.length){
+    if(info.full){
+      const shot=await rasterFrame(params=>command(tabId,'Page.captureScreenshot',params),{format:'jpeg',fromSurface:true,captureBeyondViewport:false});
+      bytes=shot.data.length;for(const id of target.sessions)transmit({type:'raster',sessionId:id,full:true,data:shot.data,width:info.width,height:info.height});
+    }else if(info.regions.length){
       // Clipped Page.captureScreenshot calls can leave stale surfaces in background tabs.
       // Capture once locally, then crop before any image bytes leave the browser.
       const shot=await rasterFrame(params=>command(tabId,'Page.captureScreenshot',params),{format:'jpeg',fromSurface:true,captureBeyondViewport:false});
@@ -458,7 +461,7 @@ async function resync(sessionId) {
 async function targetFor(tab,mode='dom') {
   let target=targets.get(tab.id);if(target)return target;
   await chrome.debugger.attach({tabId:tab.id},'1.3');
-  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
+  target={sessions:new Set(),contextId:null,capturing:false,nextSend:0,nextRaster:0,full:null,mode:['dom','raster'].includes(mode)?mode:'dom',document:new DocumentState()};targets.set(tab.id,target);
   try{await command(tab.id,'Emulation.setFocusEmulationEnabled',{enabled:true});await command(tab.id,'Runtime.enable');await command(tab.id,'Page.enable');await command(tab.id,'DOM.enable');await command(tab.id,'CSS.enable');await command(tab.id,'Network.enable',{maxTotalBufferSize:32*1024*1024,maxResourceBufferSize:8*1024*1024});await command(tab.id,'Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Response'}]});}
   catch(error){targets.delete(tab.id);await chrome.debugger.detach({tabId:tab.id}).catch(()=>{});throw error;}
   const geoScript=await command(tab.id,'Page.addScriptToEvaluateOnNewDocument',{source:'('+geolocationHook.toString()+')(crypto.randomUUID(),"__tabShareGeolocationRequest")'});target.geoScriptId=geoScript.identifier;
@@ -547,7 +550,7 @@ async function control(message) {
   if(action==='restoreViewport'||action==='viewportRelease'){if(action==='viewportRelease'&&target.viewport?.owner!==input.viewerId)return;await resizeViewport(binding.tabId,null);return;}
   if(action==='closePopup'){if(binding.session.parentId||binding.popups?.length)await chrome.tabs.remove(binding.tabId);return;}
   if(action==='dialog'){if(target?.dialog?.id!==input.dialogId)return;await command(binding.tabId,'Page.handleJavaScriptDialog',{accept:!!input.accept,promptText:input.text||''});return;}
-  if(action==='mode'){if(input.mode!=='dom')return;await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
+  if(action==='mode'){if(!['dom','raster'].includes(input.mode))return;await world(binding.tabId);await evaluate(binding.tabId,'globalThis.__tabShareDOM.setMode('+JSON.stringify(input.mode)+')');await rememberMode(target,input.mode);target.nextSend=0;await snapshot(binding.tabId);return;}
   if (input.nodeId) {
     await world(binding.tabId);
     const point = await evaluate(binding.tabId, 'globalThis.__tabShareDOM.act(' + JSON.stringify(input) + ')');
